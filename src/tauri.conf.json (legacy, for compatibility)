@@ -1,0 +1,43 @@
+{
+  "$schema": "https://tauri.app/config-schema.json",
+  "identifier": "com.vpn.client.windows11",
+  "version": "0.1.0",
+  "productName": "VPN Client",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devPath": "../public",
+    "distDir": "../public"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "VPN Client",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {},
+  "buildScripts": [],
+  "allowlist": {
+    "all": false,
+    "shell": {
+      "open": true
+    }
+  }
+}

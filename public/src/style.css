@@ -1,0 +1,391 @@
+/* Windows 11 Fluent Design System Variables */
+:root {
+  --bg-primary: #f3f3f3;
+  --bg-secondary: #ffffff;
+  --text-primary: #202020;
+  --text-secondary: #605e5c;
+  --accent-color: #0078d4;
+  --accent-hover: #106ebe;
+  --success-color: #107c10;
+  --danger-color: #d13438;
+  --warning-color: #ffc107;
+  --border-color: #e5e5e5;
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.1);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #202020;
+    --bg-secondary: #2c2c2c;
+    --text-primary: #f3f3f3;
+    --text-secondary: #a0a0a0;
+    --border-color: #404040;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* Header */
+.app-header {
+  text-align: center;
+  margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.app-header h1 {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* Main Content */
+.app-main {
+  display: grid;
+  gap: 24px;
+}
+
+/* Status Section */
+.status-section {
+  background-color: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status-indicator {
+  font-size: 18px;
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  color: white;
+  min-width: 120px;
+  text-align: center;
+}
+
+.status-indicator.disconnected { background-color: #6c757d; }
+.status-indicator.connecting { background-color: var(--warning-color); color: #333; }
+.status-indicator.connected { background-color: var(--success-color); }
+.status-indicator.disconnecting { background-color: var(--warning-color); color: #333; }
+
+.speed-display {
+  flex: 1;
+}
+
+.speed-display .label {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.speed-display .value {
+  font-size: 20px;
+  font-weight: 600;
+  margin-left: 8px;
+}
+
+/* Control Section */
+.control-section {
+  background-color: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+
+.btn {
+  font-size: 16px;
+  font-weight: 500;
+  padding: 12px 32px;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-success {
+  background-color: var(--success-color);
+  color: white;
+}
+
+.btn-danger {
+  background-color: var(--danger-color);
+  color: white;
+}
+
+/* Profiles Section */
+.profiles-section, .logs-section {
+  background-color: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.profiles-section h2, .logs-section h2 {
+  font-size: 18px;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.input-group {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.input-group label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.input-group input[type="text"] {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.input-group input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+}
+
+.input-group button {
+  padding: 10px 20px;
+  background-color: var(--accent-color);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.input-group button:hover {
+  background-color: var(--accent-hover);
+}
+
+.profiles-list {
+  margin-top: 16px;
+}
+
+.profiles-list h3 {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.profile-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background-color: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.profile-item span {
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.profile-item button {
+  padding: 6px 12px;
+  background-color: var(--accent-color);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.profile-item button:hover {
+  background-color: var(--accent-hover);
+}
+
+/* Logs Section */
+.log-controls {
+  margin-bottom: 12px;
+}
+
+.log-controls button {
+  padding: 8px 16px;
+  background-color: var(--danger-color);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.log-controls button:hover {
+  opacity: 0.9;
+}
+
+.logs-container {
+  max-height: 400px;
+  overflow-y: auto;
+  background-color: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.no-logs {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 24px;
+}
+
+.log-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+.log-entry.error {
+  background-color: rgba(209, 52, 56, 0.1);
+}
+
+.log-entry.warning {
+  background-color: rgba(255, 193, 7, 0.1);
+}
+
+.timestamp {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.level-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.level-badge.info { background-color: #17a2b8; color: white; }
+.level-badge.warning { background-color: var(--warning-color); color: #333; }
+.level-badge.error { background-color: var(--danger-color); color: white; }
+.level-badge.debug { background-color: #6c757d; color: white; }
+
+.source {
+  font-weight: 600;
+  color: var(--accent-color);
+}
+
+.message {
+  flex: 1;
+  word-break: break-all;
+}
+
+/* Footer */
+.app-footer {
+  text-align: center;
+  padding-top: 24px;
+  margin-top: 24px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* Scrollbar styling */
+.logs-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.logs-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.logs-container::-webkit-scrollbar-thumb {
+  background-color: var(--border-color);
+  border-radius: 4px;
+}
+
+.logs-container::-webkit-scrollbar-thumb:hover {
+  background-color: #a0a0a0;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .app {
+    padding: 16px;
+  }
+
+  .status-section, .control-section, .profiles-section, .logs-section {
+    padding: 16px;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .input-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .profile-item {
+    flex-direction: column;
+    gap: 8px;
+    text-align: center;
+  }
+}

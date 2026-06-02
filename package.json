@@ -1,0 +1,31 @@
+{
+  "name": "vpn-client",
+  "version": "0.1.0",
+  "description": "Lightweight VPN client for Windows 11",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.2"
+  },
+  "keywords": [
+    "vpn",
+    "tauri",
+    "windows-11",
+    "networking"
+  ],
+  "author": "VPN Client Team",
+  "license": "MIT"
+}

@@ -1,0 +1,4 @@
+.aider*
+/target/
+/src/target/
+MAIN_PROMPT.md

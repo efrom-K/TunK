@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Default capabilities for the VPN client","local":true,"windows":["main"],"permissions":["core:default","core:tray:default","core:window:default"]}}
