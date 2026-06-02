@@ -1,8 +1,6 @@
 # 🛡️ TunK VPN Client for Windows 11
 
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                 🌆 MIT License  |  ⚙️ Rust Backend  |  💎 Tauri v2 Frontend                        │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+🌆 MIT License  |  ⚙️ Rust Backend  |  💎 Tauri v2 Frontend
 
 > **⚠️ STATUS: UNDER ACTIVE DEVELOPMENT**  
 > This project is currently in active development. Some core features are fully implemented, while others are placeholders for future implementation. Please read the [Architecture Overview](#-architecture-overview) before building.
