@@ -10,18 +10,18 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "VPN Client",
-        "width": 1024,
-        "height": 768,
-        "resizable": true,
-        "fullscreen": false,
-        "center": true,
-        "decorations": true,
-        "transparent": false
-      }
-    ],
+        "windows": [
+          {
+            "title": "VPN Client",
+            "width": 1024,
+            "height": 768,
+            "resizable": true,
+            "fullscreen": false,
+            "center": true,
+            "decorations": true,
+            "transparent": false
+          }
+        ],
     "security": {
       "csp": null
     },
@@ -30,16 +30,6 @@
       "iconAsTemplate": true,
       "title": "TunK VPN",
       "tooltip": "TunK VPN Client"
-    }
-  },
-  "allowlist": {
-    "all": true,
-    "core": {
-      "window": ["hide", "show"],
-      "app": ["setWindowIcon"]
-    },
-    "fs": {
-      "scope": ["$TAURI_USER_DATA_DIR/**/*"]
     }
   },
   "bundle": {

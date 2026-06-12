@@ -67,7 +67,8 @@ impl Default for LogEntry {
     }
 }
 
-pub struct VpnState {
+/// Структура для сохранения состояния Tauri приложения
+pub struct AppState {
     pub status: RwLock<VpnStatus>,
     pub stats: RwLock<ConnectionStats>,
     pub fake_ip_cache: DashMap<String, FakeIpCacheEntry>,
@@ -78,7 +79,7 @@ pub struct VpnState {
     pub profile_id: RwLock<Option<String>>,
 }
 
-impl Default for VpnState {
+impl Default for AppState {
     fn default() -> Self {
         Self {
             status: RwLock::new(VpnStatus::Disconnected),
@@ -92,15 +93,22 @@ impl Default for VpnState {
     }
 }
 
-impl VpnState {
+impl AppState {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Логирование события с сохранением в памяти
     pub fn log(&self, level: &str, message: &str) -> Result<(), String> {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        
-        let mut logs = self.logs.lock().unwrap();
+
+        let mut logs = self.logs.lock().map_err(|e| e.to_string())?;
+        logs.push(LogEntry {
+            timestamp,
+            level: level.to_string(),
+            message: message.to_string(),
+        });
+
         if logs.len() > 100 {
             logs.remove(0);
         }
@@ -108,37 +116,49 @@ impl VpnState {
         Ok(())
     }
 
+    /// Получение последнего лога
     pub fn get_latest_log(&self) -> Option<LogEntry> {
-        let logs = self.logs.lock().unwrap();
-        logs.last().map(|e| (*e).clone())
+        let logs = self.logs.lock().ok()?;
+        logs.last().cloned()
     }
 
+    /// Очистка всех логов
     pub fn clear_logs(&self) -> Result<(), String> {
-        let mut logs = self.logs.lock().unwrap();
+        let mut logs = self.logs.lock().map_err(|e| e.to_string())?;
         logs.clear();
         Ok(())
     }
 
+    /// Установка статуса подключения
     pub fn set_status(&self, status: VpnStatus) {
-        *self.status.write().unwrap() = status;
+        if let Ok(mut guard) = self.status.write() {
+            *guard = status;
+        }
     }
 
+    /// Получение текущего статуса подключения
     pub fn get_status(&self) -> Result<VpnStatus, String> {
-        Ok(self.status.read().unwrap().clone())
+        self.status
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|e| e.to_string())
     }
 
+    /// Обновление статистики соединения
     pub fn update_stats(&self, ping: u64, download_bps: u64, upload_bps: u64) -> Result<(), String> {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().map_err(|e| e.to_string())?;
         stats.ping = ping;
         stats.download_speed_bps = download_bps;
         stats.upload_speed_bps = upload_bps;
         Ok(())
     }
 
+    /// Получение текущей статистики
     pub fn get_stats(&self) -> Result<ConnectionStats, String> {
-        Ok(self.stats.read().map_err(|e| format!("Failed to read stats: {}", e))? .clone())
+        Ok(self.stats.read().map_err(|e| format!("Failed to read stats: {}", e))?.clone())
     }
 
+    /// Добавление записи в кэш FakeIP
     pub fn add_fake_ip_entry(&self, domain: &str, fake_ip: &str, real_ip: Option<&str>) {
         let entry = FakeIpCacheEntry {
             domain: domain.to_string(),
@@ -149,14 +169,20 @@ impl VpnState {
         self.fake_ip_cache.insert(domain.to_string(), entry);
     }
 
+    /// Получение FakeIP для домена
     pub fn get_fake_ip(&self, domain: &str) -> Option<String> {
+        if let Some(ip) = self.domain_to_fake_ip.get(domain) {
+            return Some(ip.clone());
+        }
         self.fake_ip_cache.get(domain).map(|e| e.fake_ip.clone())
     }
 
+    /// Добавление сопоставления домен -> FakeIP в мейнпуджет
     pub fn add_domain_to_fake_ip_mapping(&self, domain: &str, fake_ip: &str) {
         self.domain_to_fake_ip.insert(domain.to_string(), fake_ip.to_string());
     }
 
+    /// Добавление сопоставления FakeIP -> домен в мейнпуджет
     pub fn add_fake_ip_to_domain_mapping(&self, fake_ip: &str, domain: &str) {
         self.fake_ip_to_domain.insert(fake_ip.to_string(), domain.to_string());
     }
@@ -168,7 +194,7 @@ impl VpnState {
         Ok(())
     }
 
-    /// Очистка кэша доменов и FakeIP (через VpnState)
+    /// Очистка кэша доменов и FakeIP (через AppState)
     pub fn clear_vpn_cache(&self) -> Result<(), String> {
         self.clear_cache()
     }
@@ -178,9 +204,24 @@ impl VpnState {
         self.domain_to_fake_ip.contains_key(domain)
     }
 
-    /// Проверка наличия домена в кэше (через VpnState)
+    /// Проверка наличия домена в кэше (через AppState)
     pub fn has_cached_domain_vpn(&self, domain: &str) -> bool {
         self.domain_to_fake_ip.contains_key(domain)
+    }
+
+    /// Установка профиля
+    pub fn set_profile_id(&self, profile_id: Option<String>) {
+        if let Ok(mut guard) = self.profile_id.write() {
+            *guard = profile_id;
+        }
+    }
+
+    /// Получение текущего профиля
+    pub fn get_profile_id(&self) -> Option<String> {
+        match self.profile_id.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => None,
+        }
     }
 }
 
@@ -189,8 +230,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vpn_state_initialization() {
-        let state = VpnState::new();
+    fn test_app_state_initialization() {
+        let state = AppState::new();
         
         assert_eq!(state.get_status().unwrap(), VpnStatus::Disconnected);
         assert_eq!(state.get_stats().unwrap().ping, 0);
@@ -199,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_log_functionality() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         state.log("INFO", "Test message").unwrap();
         
@@ -210,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_status_change() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         state.set_status(VpnStatus::Connecting);
         assert_eq!(state.get_status().unwrap(), VpnStatus::Connecting);
@@ -221,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_stats_update() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         state.update_stats(50, 1000000, 500000).unwrap();
         
@@ -233,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_log_limit() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         for i in 0..105 {
             state.log("INFO", &format!("Log message {}", i)).unwrap();
@@ -244,13 +285,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_log_access() {
-        let state = VpnState::new();
-        
+        let state = Arc::new(AppState::new());
+
         let mut handles = Vec::new();
-        
+
         for _ in 0..10 {
             let state_clone = state.clone();
-            
+
             let handle = tokio::spawn(async move {
                 for i in 0..10 {
                     state_clone.log("INFO", &format!("Concurrent log {}", i)).unwrap();
@@ -267,16 +308,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_fake_ip_operations() {
-        let state = VpnState::new();
-        
+        let state = Arc::new(AppState::new());
+
         let mut handles = Vec::new();
-        
+
         for i in 0..10 {
             let domain = format!("domain{}.example.com", i);
             let fake_ip = format!("198.18.0.{}", i);
-            
+
             let state_clone = state.clone();
-            
+
             let handle = tokio::spawn(async move {
                 state_clone.add_fake_ip_entry(&domain, &fake_ip, None);
                 
@@ -294,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_domain_to_fake_ip_mapping() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         state.add_domain_to_fake_ip_mapping("example.com", "198.18.0.5");
         state.add_fake_ip_to_domain_mapping("198.18.0.5", "example.com");
@@ -304,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_clear_logs() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         for i in 0..10 {
             state.log("INFO", &format!("Log message {}", i)).unwrap();
@@ -319,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_clear_cache() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         // Добавляем записи в кэш
         for i in 0..5 {
@@ -340,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_has_cached_domain() {
-        let state = VpnState::new();
+        let state = AppState::new();
         
         assert!(!state.has_cached_domain("example.com"));
         
@@ -369,5 +410,19 @@ mod tests {
         assert_ne!(VpnStatus::Connected, VpnStatus::Disconnected);
         assert_ne!(VpnStatus::Connected, VpnStatus::Connecting);
         assert_ne!(VpnStatus::Connected, VpnStatus::Disconnecting);
+    }
+
+    #[test]
+    fn test_get_profile_id() {
+        let state = AppState::new();
+        
+        // По умолчанию profile_id должен быть None
+        assert_eq!(state.get_profile_id(), None);
+        
+        state.set_profile_id(Some("profile1".to_string()));
+        assert_eq!(state.get_profile_id(), Some("profile1".to_string()));
+        
+        state.set_profile_id(None);
+        assert_eq!(state.get_profile_id(), None);
     }
 }

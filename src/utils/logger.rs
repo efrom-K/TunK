@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
-use anyhow::{Result, Context};
-use chrono::{DateTime, Utc};
+use anyhow::Result;
 
 pub struct Logger {
     pub logs: Arc<Mutex<Vec<String>>>,
@@ -15,51 +14,37 @@ impl Logger {
 
     pub fn log(&self, level: crate::utils::LogLevel, source: &str, message: &str) -> Result<(), String> {
         let formatted = crate::utils::get_formatted_log(level, source, message);
-        
-        self.logs.lock().map_err(|e| e.to_string())?;
-        
+
+        let mut logs = self.logs.lock().map_err(|e| e.to_string())?;
+        logs.push(formatted);
+
         Ok(())
     }
 
     pub fn info(&self, source: &str, message: &str) -> Result<(), String> {
-        let formatted = crate::utils::get_formatted_log(crate::utils::LogLevel::Info, source, message);
-        
-        self.logs.lock().map_err(|e| e.to_string())?;
-        
-        Ok(())
+        self.log(crate::utils::LogLevel::Info, source, message)
     }
 
     pub fn warning(&self, source: &str, message: &str) -> Result<(), String> {
-        let formatted = crate::utils::get_formatted_log(crate::utils::LogLevel::Warning, source, message);
-        
-        self.logs.lock().map_err(|e| e.to_string())?;
-        
-        Ok(())
+        self.log(crate::utils::LogLevel::Warning, source, message)
     }
 
     pub fn error(&self, source: &str, message: &str) -> Result<(), String> {
-        let formatted = crate::utils::get_formatted_log(crate::utils::LogLevel::Error, source, message);
-        
-        self.logs.lock().map_err(|e| e.to_string())?;
-        
-        Ok(())
+        self.log(crate::utils::LogLevel::Error, source, message)
     }
 
     pub fn debug(&self, source: &str, message: &str) -> Result<(), String> {
-        let formatted = crate::utils::get_formatted_log(crate::utils::LogLevel::Debug, source, message);
-        
-        self.logs.lock().map_err(|e| e.to_string())?;
-        
-        Ok(())
+        self.log(crate::utils::LogLevel::Debug, source, message)
     }
 
     pub fn get_logs(&self) -> Vec<String> {
-        self.logs.lock().unwrap_or_default().clone()
+        self.logs.lock().map(|logs| logs.clone()).unwrap_or_default()
     }
 
     pub fn clear_logs(&self) {
-        let mut logs = self.logs.lock().unwrap();
-        logs.clear();
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.clear();
+        }
     }
 
     pub fn get_log_count(&self) -> usize {
@@ -112,17 +97,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_logger_concurrent_access() {
-        let logger = Logger::new();
-        
+        let logger = Arc::new(Logger::new());
+
         let handles: Vec<_> = (0..10)
-            .map(|_| tokio::spawn(async move {
-                logger.info("DNS", "Concurrent info").unwrap_or_default();
-            }))
+            .map(|_| {
+                let logger = logger.clone();
+                tokio::spawn(async move {
+                    logger.info("DNS", "Concurrent info").unwrap_or_default();
+                })
+            })
             .collect();
-        
+
         for handle in handles {
             let _ = handle.await;
         }
+
+        assert_eq!(logger.get_log_count(), 10);
     }
 
     #[test]

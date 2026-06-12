@@ -3,21 +3,17 @@ name = "vpn-client"
 version = "0.1.0"
 edition = "2021"
 authors = ["VPN Client Team"]
-description = "Lightweight VPN client for Windows 11"
+description = "Lightweight VPN Client for Windows 11"
 license = "MIT"
 
-# ← Исправлен path для библиотеки
+# Библиотека vpn-client (lib.rs) - cdylib для Tauri
 [lib]
 name = "vpn_client_lib"
+path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs" # ← Указан полный путь src/
-
-[[bin]]
-name = "vpn-client"
-path = "main.rs"
 
 [dependencies]
-tauri = { version = "2.0", features = [] }
+tauri = { version = "2.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }
@@ -44,14 +40,10 @@ chrono = "0.4.44"
 tokio-test = "0.4"
 
 [build-dependencies]
-tauri-build = { version = "2.0", features = [] }
+tauri-build = { version = "2.0", default-features = false }
 
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
-
-[features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]

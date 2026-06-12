@@ -1,4 +1,3 @@
-use anyhow::{Result, Context};
 use chrono::{DateTime, Utc};
 
 pub mod logger;
@@ -31,26 +30,22 @@ impl LogEntry {
         }
     }
 
-    pub fn format(&self) -> String {
-        let time_str = self.timestamp.format("%H:%M:%S").to_string();
-        
+    fn level_str(&self) -> &'static str {
         match self.level {
-            LogLevel::Info => format!("[{}] [{}] {}", time_str, self.source, self.message),
-            LogLevel::Warning => format!("[{}] [{}] {}", time_str, self.source, self.message),
-            LogLevel::Error => format!("[{}] [{}] {}", time_str, self.source, self.message),
-            LogLevel::Debug => format!("[{}] [{}] {}", time_str, self.source, self.message),
-        }
-    }
-
-    pub fn to_log_line(&self) -> String {
-        let level_str = match self.level {
             LogLevel::Info => "INFO",
             LogLevel::Warning => "WARN",
             LogLevel::Error => "ERROR",
             LogLevel::Debug => "DEBUG",
-        };
-        
-        format!("[{}] [{}] {}", time_str, level_str, self.message)
+        }
+    }
+
+    pub fn format(&self) -> String {
+        let time_str = self.timestamp.format("%H:%M:%S").to_string();
+        format!("[{}] [{}] [{}] {}", time_str, self.level_str(), self.source, self.message)
+    }
+
+    pub fn to_log_line(&self) -> String {
+        format!("[{}] [{}] {}", self.level_str(), self.source, self.message)
     }
 }
 

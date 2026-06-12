@@ -1,4 +1,59 @@
+# --- AI tooling / scratch ---
 .aider*
+MAIN_PROMPT.md
+.claude/
+
+# --- Rust ---
 /target/
 /src/target/
-MAIN_PROMPT.md
+**/*.rs.bk
+*.pdb
+
+# --- Tauri / frontend build output ---
+node_modules/
+dist/
+build/
+.vite/
+src/dist/
+src-tauri/target/
+*.exe
+*.msi
+*.dmg
+*.app
+*.AppImage
+
+# --- Wintun driver binary (downloaded at runtime, must not be committed) ---
+wintun.dll
+**/wintun.dll
+*.sys
+
+# --- Secrets & credentials ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# --- VPN profile/subscription data (may contain proxy credentials) ---
+subscriptions.json
+profiles.json
+vpn-config.json
+*.profile.json
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/

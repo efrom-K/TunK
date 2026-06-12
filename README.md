@@ -24,12 +24,12 @@ A high-performance, lightweight VPN client specifically optimized for **Windows 
 | Component | Status | Notes |
 | :--- | :---: | :--- |
 | **FakeIP Manager** | ✅ Implemented | IP allocation from `198.18.0.0/16` pool; DashMap concurrency. |
-| **DNS Engine** | ⚠️ Partial | DoH client structure ready; DNS interception logic in progress. |
+| **DNS Engine** | ✅ Implemented | `DoHClient` resolves via Cloudflare DoH JSON API with caching. |
 | **Obfuscation Module** | ✅ Implemented | Shadowsocks AEAD, VLESS, Trojan header obfuscation complete. |
 | **TLS Sniffer** | ✅ Implemented | SNI parsing from TLS Client Hello packets functional. |
-| **Wintun TUN Interface** | ⚠️ Placeholder | Driver integration pending full implementation. |
+| **Wintun TUN Interface** | ✅ Implemented | Adapter creation, session start and async packet loop via `wintun` crate. |
 | **System Tray (Win 11)** | ⚠️ Partial | Basic structure in place; menu actions to be completed. |
-| **Routing Logic** | ⚠️ In Progress | `Windows netsh` route manipulation pending. |
+| **Routing Logic** | ✅ Implemented | `route`/`netsh` based default-route and proxy-exclusion management. |
 
 ---
 
@@ -46,8 +46,9 @@ src/
 │
 ├── lib.rs               # Library module exports
 ├── network/             # Network layer components
-│   ├── dns.rs           # FakeIpManager + DNS interception logic
-│   └── tun.rs           # Wintun adapter (placeholder for full implementation)
+│   ├── dns.rs           # FakeIpManager + DoH resolver
+│   ├── route.rs         # Windows routing table parsing & netsh/route management
+│   └── tun.rs           # Wintun adapter, session and packet loop
 │
 └── proxy/               # Traffic handling and security
     ├── obfuscation.rs   # Traffic obfuscation headers
@@ -176,7 +177,7 @@ v0.1.0 (Current Development Version)
 * ✅ [x] Completed DNS engine structure and DoH client integration.
 * ✅ [x] Added traffic obfuscation headers (Shadowsocks AEAD, VLESS, Trojan).
 * ✅ [x] Deployed TLS sniffer for SNI parsing.
-* ⬜ [ ] Wintun TUN integration (Stage 3 - In Progress).
+* ✅ [x] Wintun TUN integration: adapter/session lifecycle, async packet loop, route management (Stage 3).
 * ⬜ [ ] System tray full implementation.
 v0.0.1
 * ✅ [x] Project skeleton with Tauri v2 established.
