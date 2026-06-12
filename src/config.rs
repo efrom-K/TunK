@@ -1,4 +1,7 @@
+use base64::{engine::general_purpose, Engine as _};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyProfile {
@@ -101,6 +104,156 @@ impl Default for TunSettings {
     }
 }
 
+/// Разбирает строку подписки одного из поддерживаемых форматов
+/// (`vless://`, `ss://`, `trojan://`) в `ProxyProfile`.
+pub fn parse_subscription_url(url: &str) -> Result<ProxyProfile, String> {
+    if let Some(rest) = url.strip_prefix("vless://") {
+        parse_vless_url(url, rest)
+    } else if let Some(rest) = url.strip_prefix("ss://") {
+        parse_shadowsocks_url(url, rest)
+    } else if let Some(rest) = url.strip_prefix("trojan://") {
+        parse_trojan_url(url, rest)
+    } else {
+        Err(format!("Неподдерживаемая схема подписки: {}", url))
+    }
+}
+
+/// Разбирает `vless://uuid@host:port?params#name`.
+fn parse_vless_url(original_url: &str, rest: &str) -> Result<ProxyProfile, String> {
+    let body = strip_query_and_fragment(rest);
+
+    let (uuid, host_port) = body
+        .split_once('@')
+        .ok_or_else(|| format!("Некорректный VLESS URL: отсутствует UUID: {}", original_url))?;
+
+    if uuid.is_empty() {
+        return Err(format!("Некорректный VLESS URL: пустой UUID: {}", original_url));
+    }
+
+    let (server, port) = split_host_port(host_port)?;
+    let name = extract_fragment_name(rest, &server);
+
+    Ok(ProxyProfile {
+        id: Uuid::new_v4().to_string(),
+        name,
+        url: original_url.to_string(),
+        protocol: ProtocolType::Vless,
+        server,
+        port,
+        username: Some(uuid.to_string()),
+        password: None,
+    })
+}
+
+/// Разбирает `trojan://password@host:port?params#name`.
+fn parse_trojan_url(original_url: &str, rest: &str) -> Result<ProxyProfile, String> {
+    let body = strip_query_and_fragment(rest);
+
+    let (password, host_port) = body
+        .split_once('@')
+        .ok_or_else(|| format!("Некорректный Trojan URL: отсутствует пароль: {}", original_url))?;
+
+    if password.is_empty() {
+        return Err(format!("Некорректный Trojan URL: пустой пароль: {}", original_url));
+    }
+
+    let (server, port) = split_host_port(host_port)?;
+    let name = extract_fragment_name(rest, &server);
+
+    Ok(ProxyProfile {
+        id: Uuid::new_v4().to_string(),
+        name,
+        url: original_url.to_string(),
+        protocol: ProtocolType::Trojan,
+        server,
+        port,
+        username: None,
+        password: Some(password.to_string()),
+    })
+}
+
+/// Разбирает `ss://base64(method:password)@host:port#name`.
+fn parse_shadowsocks_url(original_url: &str, rest: &str) -> Result<ProxyProfile, String> {
+    let body = strip_query_and_fragment(rest);
+
+    let (userinfo, host_port) = body
+        .split_once('@')
+        .ok_or_else(|| format!("Некорректный Shadowsocks URL: отсутствуют учетные данные: {}", original_url))?;
+
+    let decoded = decode_base64_userinfo(userinfo)?;
+    let (method, password) = decoded
+        .split_once(':')
+        .ok_or_else(|| format!("Некорректные учетные данные Shadowsocks: {}", decoded))?;
+
+    let (server, port) = split_host_port(host_port)?;
+    let name = extract_fragment_name(rest, &server);
+
+    Ok(ProxyProfile {
+        id: Uuid::new_v4().to_string(),
+        name,
+        url: original_url.to_string(),
+        protocol: ProtocolType::Shadowsocks,
+        server,
+        port,
+        username: Some(method.to_string()),
+        password: Some(password.to_string()),
+    })
+}
+
+/// Отрезает query-строку (`?...`) и fragment (`#...`) от части URL после userinfo/хоста.
+fn strip_query_and_fragment(value: &str) -> &str {
+    let without_fragment = value.split('#').next().unwrap_or(value);
+    without_fragment.split('?').next().unwrap_or(without_fragment)
+}
+
+/// Разбирает `host:port` на хост и порт.
+fn split_host_port(host_port: &str) -> Result<(String, u16), String> {
+    let (host, port_str) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| format!("Некорректный адрес сервера: {}", host_port))?;
+
+    let port = port_str
+        .parse::<u16>()
+        .map_err(|_| format!("Некорректный порт: {}", port_str))?;
+
+    if host.is_empty() {
+        return Err(format!("Некорректный адрес сервера: {}", host_port));
+    }
+
+    Ok((host.to_string(), port))
+}
+
+/// Декодирует имя профиля из fragment-части URL (`#name`), пробуя несколько форматов.
+fn extract_fragment_name(value: &str, default: &str) -> String {
+    match value.find('#') {
+        Some(idx) => percent_decode_str(&value[idx + 1..])
+            .decode_utf8()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|_| default.to_string()),
+        None => default.to_string(),
+    }
+}
+
+/// Декодирует userinfo `ss://` подписки (`method:password`), пробуя несколько base64-вариантов.
+fn decode_base64_userinfo(data: &str) -> Result<String, String> {
+    let engines: [&base64::engine::GeneralPurpose; 4] = [
+        &general_purpose::URL_SAFE_NO_PAD,
+        &general_purpose::STANDARD_NO_PAD,
+        &general_purpose::URL_SAFE,
+        &general_purpose::STANDARD,
+    ];
+
+    for engine in engines {
+        if let Ok(bytes) = engine.decode(data) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                return Ok(text);
+            }
+        }
+    }
+
+    Err(format!("Не удалось декодировать учетные данные Shadowsocks: {}", data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +294,79 @@ mod tests {
 
         let json = serde_json::to_string(&profile).unwrap();
         assert!(json.contains("vless"));
+    }
+
+    #[test]
+    fn test_parse_vless_url() {
+        let url = "vless://550e8400-e29b-41d4-a716-446655440000@example.com:443?security=tls#My%20Server";
+
+        let profile = parse_subscription_url(url).unwrap();
+
+        assert!(matches!(profile.protocol, ProtocolType::Vless));
+        assert_eq!(profile.server, "example.com");
+        assert_eq!(profile.port, 443);
+        assert_eq!(profile.username.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(profile.password, None);
+        assert_eq!(profile.name, "My Server");
+        assert_eq!(profile.url, url);
+    }
+
+    #[test]
+    fn test_parse_trojan_url() {
+        let url = "trojan://supersecret@trojan.example.com:8443?sni=example.com#Trojan%20Node";
+
+        let profile = parse_subscription_url(url).unwrap();
+
+        assert!(matches!(profile.protocol, ProtocolType::Trojan));
+        assert_eq!(profile.server, "trojan.example.com");
+        assert_eq!(profile.port, 8443);
+        assert_eq!(profile.username, None);
+        assert_eq!(profile.password.as_deref(), Some("supersecret"));
+        assert_eq!(profile.name, "Trojan Node");
+    }
+
+    #[test]
+    fn test_parse_shadowsocks_url() {
+        let userinfo = general_purpose::STANDARD.encode("aes-256-gcm:my-password");
+        let url = format!("ss://{}@ss.example.com:8388#SS%20Node", userinfo);
+
+        let profile = parse_subscription_url(&url).unwrap();
+
+        assert!(matches!(profile.protocol, ProtocolType::Shadowsocks));
+        assert_eq!(profile.server, "ss.example.com");
+        assert_eq!(profile.port, 8388);
+        assert_eq!(profile.username.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(profile.password.as_deref(), Some("my-password"));
+        assert_eq!(profile.name, "SS Node");
+    }
+
+    #[test]
+    fn test_parse_subscription_url_without_fragment_uses_host_as_name() {
+        let url = "vless://uuid-value@example.com:443";
+
+        let profile = parse_subscription_url(url).unwrap();
+
+        assert_eq!(profile.name, "example.com");
+    }
+
+    #[test]
+    fn test_parse_subscription_url_invalid_scheme() {
+        let result = parse_subscription_url("http://example.com");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_subscription_url_missing_userinfo() {
+        let result = parse_subscription_url("vless://example.com:443");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_subscription_url_invalid_port() {
+        let result = parse_subscription_url("trojan://password@example.com:notaport");
+
+        assert!(result.is_err());
     }
 }

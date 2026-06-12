@@ -12,8 +12,12 @@ name = "vpn_client_lib"
 path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "vpn-client"
+path = "main.rs"
+
 [dependencies]
-tauri = { version = "2.0", default-features = false }
+tauri = { version = "2.0", default-features = false, features = ["tray-icon", "wry"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }
@@ -26,6 +30,7 @@ regex = "1.10"
 # Новые зависимости для network модуля
 reqwest = { version = "0.11", features = ["json"] }  # Для DoH запросов
 percent-encoding = "2.3"  # Для URL encoding
+base64 = "0.21"  # Для декодирования userinfo в ss:// подписках
 winapi = { version = "0.3", features = [
     "winbase",
     "winnt",

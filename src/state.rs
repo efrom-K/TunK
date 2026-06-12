@@ -1,8 +1,12 @@
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, RwLock};
 use chrono;
 
-#[derive(Debug, Clone, PartialEq)]
+use crate::config::ProxyProfile;
+use crate::network::tun::WintunAdapter;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VpnStatus {
     Disconnected,
     Connecting,
@@ -50,7 +54,7 @@ impl Default for FakeIpCacheEntry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
     pub level: String,
@@ -77,6 +81,8 @@ pub struct AppState {
     pub logs: Arc<Mutex<Vec<LogEntry>>>,
     #[allow(dead_code)]
     pub profile_id: RwLock<Option<String>>,
+    pub profiles: RwLock<Vec<ProxyProfile>>,
+    pub tunnel: Mutex<Option<WintunAdapter>>,
 }
 
 impl Default for AppState {
@@ -89,6 +95,8 @@ impl Default for AppState {
             fake_ip_to_domain: DashMap::new(),
             logs: Arc::new(Mutex::new(Vec::new())),
             profile_id: RwLock::new(None),
+            profiles: RwLock::new(Vec::new()),
+            tunnel: Mutex::new(None),
         }
     }
 }
@@ -222,6 +230,40 @@ impl AppState {
             Ok(guard) => guard.clone(),
             Err(_) => None,
         }
+    }
+
+    /// Добавление профиля в список доступных профилей
+    pub fn add_profile(&self, profile: ProxyProfile) -> Result<(), String> {
+        let mut profiles = self.profiles.write().map_err(|e| e.to_string())?;
+        profiles.push(profile);
+        Ok(())
+    }
+
+    /// Замена списка доступных профилей (например, после обновления подписки)
+    pub fn set_profiles(&self, new_profiles: Vec<ProxyProfile>) -> Result<(), String> {
+        let mut profiles = self.profiles.write().map_err(|e| e.to_string())?;
+        *profiles = new_profiles;
+        Ok(())
+    }
+
+    /// Получение списка доступных профилей
+    pub fn get_profiles(&self) -> Result<Vec<ProxyProfile>, String> {
+        self.profiles
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Поиск профиля по идентификатору
+    pub fn find_profile(&self, profile_id: &str) -> Result<Option<ProxyProfile>, String> {
+        let profiles = self.profiles.read().map_err(|e| e.to_string())?;
+        Ok(profiles.iter().find(|p| p.id == profile_id).cloned())
+    }
+
+    /// Получение последних N логов
+    pub fn get_logs(&self) -> Result<Vec<LogEntry>, String> {
+        let logs = self.logs.lock().map_err(|e| e.to_string())?;
+        Ok(logs.clone())
     }
 }
 
@@ -410,6 +452,76 @@ mod tests {
         assert_ne!(VpnStatus::Connected, VpnStatus::Disconnected);
         assert_ne!(VpnStatus::Connected, VpnStatus::Connecting);
         assert_ne!(VpnStatus::Connected, VpnStatus::Disconnecting);
+    }
+
+    fn make_test_profile(id: &str) -> ProxyProfile {
+        ProxyProfile {
+            id: id.to_string(),
+            name: "Test Profile".to_string(),
+            url: "vless://uuid@example.com:443".to_string(),
+            protocol: crate::config::ProtocolType::Vless,
+            server: "example.com".to_string(),
+            port: 443,
+            username: Some("uuid".to_string()),
+            password: None,
+        }
+    }
+
+    #[test]
+    fn test_add_and_get_profiles() {
+        let state = AppState::new();
+
+        assert!(state.get_profiles().unwrap().is_empty());
+
+        state.add_profile(make_test_profile("profile1")).unwrap();
+
+        let profiles = state.get_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "profile1");
+    }
+
+    #[test]
+    fn test_set_profiles_replaces_existing() {
+        let state = AppState::new();
+
+        state.add_profile(make_test_profile("profile1")).unwrap();
+        state.set_profiles(vec![make_test_profile("profile2"), make_test_profile("profile3")]).unwrap();
+
+        let profiles = state.get_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].id, "profile2");
+        assert_eq!(profiles[1].id, "profile3");
+    }
+
+    #[test]
+    fn test_find_profile() {
+        let state = AppState::new();
+
+        state.add_profile(make_test_profile("profile1")).unwrap();
+        state.add_profile(make_test_profile("profile2")).unwrap();
+
+        assert_eq!(state.find_profile("profile2").unwrap().map(|p| p.id), Some("profile2".to_string()));
+        assert!(state.find_profile("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_logs() {
+        let state = AppState::new();
+
+        state.log("INFO", "first").unwrap();
+        state.log("ERROR", "second").unwrap();
+
+        let logs = state.get_logs().unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].message, "first");
+        assert_eq!(logs[1].level, "ERROR");
+    }
+
+    #[test]
+    fn test_vpn_status_serialization() {
+        let status = VpnStatus::Connected;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"Connected\"");
     }
 
     #[test]

@@ -26,10 +26,12 @@ A high-performance, lightweight VPN client specifically optimized for **Windows 
 | **FakeIP Manager** | ✅ Implemented | IP allocation from `198.18.0.0/16` pool; DashMap concurrency. |
 | **DNS Engine** | ✅ Implemented | `DoHClient` resolves via Cloudflare DoH JSON API with caching. |
 | **Obfuscation Module** | ✅ Implemented | Shadowsocks AEAD, VLESS, Trojan header obfuscation complete. |
-| **TLS Sniffer** | ✅ Implemented | SNI parsing from TLS Client Hello packets functional. |
+| **TLS Sniffer** | ✅ Implemented | SNI parsing from real TLS Client Hello byte streams, covered by raw-byte tests. |
 | **Wintun TUN Interface** | ✅ Implemented | Adapter creation, session start and async packet loop via `wintun` crate. |
 | **System Tray (Win 11)** | ⚠️ Partial | Basic structure in place; menu actions to be completed. |
 | **Routing Logic** | ✅ Implemented | `route`/`netsh` based default-route and proxy-exclusion management. |
+| **Subscription Parsing** | ✅ Implemented | `vless://`, `ss://`, `trojan://` URL parsing into `ProxyProfile`. |
+| **Tauri Commands & UI** | ✅ Implemented | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs` wired to a React frontend. |
 
 ---
 
@@ -117,8 +119,10 @@ cargo tarpaulin --out Html
 | :--- | :---: | :--- |
 | network/dns.rs | ✅ 100% | IP allocation, collision prevention, reverse resolution. |
 | proxy/obfuscation.rs | ✅ 95% | AEAD header logic, packet length validation. |
-| state.rs | ✅ 100% | Logging, status management, concurrent access. |
-| proxy/sniffer.rs | ✅ 85% | TLS record detection, SNI parsing. |
+| state.rs | ✅ 100% | Logging, status management, profiles, concurrent access. |
+| proxy/sniffer.rs | ✅ 95% | TLS record detection, SNI extraction from real Client Hello bytes. |
+| config.rs | ✅ 100% | Subscription URL parsing for vless/ss/trojan. |
+| commands.rs | ✅ 100% | Tauri command handlers (status, speed, profiles, logs, toggle). |
 
 ## 📁 Project Structure (Root)
 ```text
@@ -136,14 +140,16 @@ vpn-client/
 │   ├── lib.rs
 │   ├── network/            # DNS & TUN logic
 │   └── proxy/              # Obfuscation & Sniffing
-├── public/                 # Frontend Assets
+├── public/                 # Frontend source (Vite root)
 │   ├── index.html
-│   ├── src/                # Vanilla TypeScript (React-like structure)
-│   │   ├── App.tsx
-│   │   ├── main.ts
-│   │   └── style.css
-│   └── styles.css
+│   └── src/                # React + TypeScript
+│       ├── App.tsx
+│       ├── main.tsx
+│       └── style.css
+├── dist/                   # Vite production build output (frontendDist)
 ├── icons/                  # Application icons
+├── vite.config.ts          # Vite build configuration
+├── tsconfig.json           # TypeScript configuration
 └── package.json            # NPM dependencies & scripts
 ```
 ---
@@ -178,6 +184,7 @@ v0.1.0 (Current Development Version)
 * ✅ [x] Added traffic obfuscation headers (Shadowsocks AEAD, VLESS, Trojan).
 * ✅ [x] Deployed TLS sniffer for SNI parsing.
 * ✅ [x] Wintun TUN integration: adapter/session lifecycle, async packet loop, route management (Stage 3).
+* ✅ [x] SNI extraction validated against real TLS Client Hello byte streams, subscription URL parsing (vless/ss/trojan), full Tauri v2 command set wired to a React UI (Stage 4).
 * ⬜ [ ] System tray full implementation.
 v0.0.1
 * ✅ [x] Project skeleton with Tauri v2 established.

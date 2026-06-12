@@ -1,8 +1,19 @@
-import { useState, useEffect } from 'react';
-import { invoke, listen } from '@tauri-apps/api/core';
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 
-type VpnStatus = 'disconnected' | 'connecting' | 'connected' | 'disconnecting';
+type VpnStatus = 'Disconnected' | 'Connecting' | 'Connected' | 'Disconnecting';
+
+interface ProxyProfile {
+  id: string;
+  name: string;
+  url: string;
+  protocol: 'Vless' | 'Shadowsocks' | 'Trojan';
+  server: string;
+  port: number;
+  username: string | null;
+  password: string | null;
+}
 
 interface LogEntry {
   timestamp: string;
@@ -10,87 +21,81 @@ interface LogEntry {
   message: string;
 }
 
+const POLL_INTERVAL_MS = 1000;
+
 export default function App() {
-  const [status, setStatus] = useState<VpnStatus>('disconnected');
+  const [status, setStatus] = useState<VpnStatus>('Disconnected');
   const [speedBps, setSpeedBps] = useState<number>(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [subscriptionUrl, setSubscriptionUrl] = useState<string>('');
-  const [profiles, setProfiles] = useState<string[]>([]);
+  const [profiles, setProfiles] = useState<ProxyProfile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
+  // Опрос статуса, скорости и логов с бэкенда
   useEffect(() => {
-    // Подписка на события из Rust бэкенда
-    const statusEvent = listen<VpnStatus>('status_changed', (event) => {
-      setStatus(event.payload);
-    });
-    
-    return () => {
-      // Cleanup
-      statusEvent.then(unlisten);
+    const poll = async () => {
+      try {
+        const [currentStatus, currentSpeed, currentLogs] = await Promise.all([
+          invoke<VpnStatus>('get_vpn_status'),
+          invoke<number>('get_speed_bps'),
+          invoke<LogEntry[]>('get_logs'),
+        ]);
+
+        setStatus(currentStatus);
+        setSpeedBps(currentSpeed);
+        setLogs(currentLogs);
+      } catch (err) {
+        console.error('Error polling VPN state:', err);
+      }
     };
+
+    poll();
+    const interval = setInterval(poll, POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
   }, []);
 
+  // Загрузка списка профилей при старте
   useEffect(() => {
-    // Подписка на скорость
-    const speedEvent = listen<number>('speed_changed', (event) => {
-      setSpeedBps(event.payload);
-    });
-    
-    return () => {
-      // Cleanup
-      speedEvent.then(unlisten);
-    };
+    invoke<ProxyProfile[]>('get_profiles')
+      .then(setProfiles)
+      .catch((err) => console.error('Error loading profiles:', err));
   }, []);
 
-  useEffect(() => {
-    // Подписка на логи
-    const logsEvent = listen<LogEntry>('log_entry', (event) => {
-      setLogs(prev => [...prev, event.payload]);
-    });
-    
-    return () => {
-      // Cleanup
-      logsEvent.then(unlisten);
-    };
-  }, []);
+  const handleToggleVpn = async () => {
+    setError(null);
 
-  const handleToggleVpn = async (enable: boolean) => {
     try {
-      await invoke<void>('toggle_vpn', { enable });
-      
-      setStatus(enable ? 'connecting' : 'disconnecting');
-      
-      setTimeout(() => {
-        setStatus(enable ? 'connected' : 'disconnected');
-      }, 2000);
-    } catch (error) {
-      console.error('Error toggling VPN:', error);
+      const newStatus = await invoke<VpnStatus>('toggle_vpn', { enable: status !== 'Connected' });
+      setStatus(newStatus);
+    } catch (err) {
+      setError(String(err));
     }
   };
 
   const handleAddSubscription = async () => {
     if (!subscriptionUrl.trim()) return;
-    
+
+    setError(null);
+
     try {
-      const profiles = await invoke<string[]>('add_subscription', { url: subscriptionUrl });
-      setProfiles(profiles);
+      const newProfiles = await invoke<ProxyProfile[]>('add_subscription', { url: subscriptionUrl });
+      setProfiles(newProfiles);
       setSubscriptionUrl('');
-      
-      // Добавление лога о добавлении подписки
-      addLog('INFO', 'SUBSCRIPTION', `Добавлена подписка: ${subscriptionUrl}`);
-    } catch (error) {
-      console.error('Error adding subscription:', error);
-      addLog('ERROR', 'SUBSCRIPTION', 'Ошибка при добавлении подписки');
+    } catch (err) {
+      setError(String(err));
     }
   };
 
-  const handleSelectProfile = async (profile: string) => {
+  const handleSelectProfile = async (profileId: string) => {
+    setError(null);
+
     try {
-      await invoke<void>('set_profile', { profile });
-      
-      // Добавление лога о выборе профиля
-      addLog('INFO', 'PROFILE', `Выбран профиль: ${profile}`);
-    } catch (error) {
-      console.error('Error selecting profile:', error);
+      await invoke<void>('set_profile', { profileId });
+      setSelectedProfileId(profileId);
+    } catch (err) {
+      setError(String(err));
     }
   };
 
@@ -100,10 +105,10 @@ export default function App() {
 
   const formatSpeed = (bps: number): string => {
     if (bps === 0) return '0 B/s';
-    
+
     const mbps = bps / 1_048_576;
     const kbps = bps / 1_024;
-    
+
     if (mbps >= 1) {
       return `${mbps.toFixed(2)} MB/s`;
     } else if (kbps >= 1) {
@@ -113,44 +118,11 @@ export default function App() {
     }
   };
 
-  const getStatusText = (): string => {
-    switch (status) {
-      case 'disconnected':
-        return 'Отключено';
-      case 'connecting':
-        return 'Подключение...';
-      case 'connected':
-        return 'Подключено';
-      case 'disconnecting':
-        return 'Отключение...';
-      default:
-        return 'Неизвестно';
-    }
-  };
-
-  const getStatusColor = (): string => {
-    switch (status) {
-      case 'disconnected':
-        return '#6c757d'; // Gray
-      case 'connecting':
-        return '#ffc107'; // Warning
-      case 'connected':
-        return '#28a745'; // Success
-      case 'disconnecting':
-        return '#ffc107'; // Warning
-      default:
-        return '#6c757d';
-    }
-  };
-
-  const addLog = (level: string, source: string, message: string) => {
-    const timestamp = new Date().toLocaleTimeString('ru-RU');
-    
-    setLogs(prev => [...prev, {
-      timestamp,
-      level,
-      message,
-    }]);
+  const statusText: Record<VpnStatus, string> = {
+    Disconnected: 'Отключено',
+    Connecting: 'Подключение...',
+    Connected: 'Подключено',
+    Disconnecting: 'Отключение...',
   };
 
   return (
@@ -163,31 +135,37 @@ export default function App() {
       <main className="app-main">
         {/* Статус и скорость */}
         <section className="status-section">
-          <div className={`status-indicator ${status}`}>
-            {getStatusText()}
+          <div className={`status-indicator ${status.toLowerCase()}`}>
+            {statusText[status]}
           </div>
-          
+
           <div className="speed-display">
             <span className="label">Скорость:</span>
             <span className="value">{formatSpeed(speedBps)}</span>
           </div>
         </section>
 
+        {error && (
+          <section className="error-section">
+            <p className="error-message">{error}</p>
+          </section>
+        )}
+
         {/* Кнопка подключения */}
         <section className="control-section">
-          <button 
-            className={`btn ${status === 'connected' ? 'btn-danger' : 'btn-success'}`}
-            onClick={() => handleToggleVpn(!status.includes('dis'))}
-            disabled={status === 'connecting' || status === 'disconnecting'}
+          <button
+            className={`btn ${status === 'Connected' ? 'btn-danger' : 'btn-success'}`}
+            onClick={handleToggleVpn}
+            disabled={status === 'Connecting' || status === 'Disconnecting'}
           >
-            {status === 'connected' ? 'Отключить VPN' : 'Подключить VPN'}
+            {status === 'Connected' ? 'Отключить VPN' : 'Подключить VPN'}
           </button>
         </section>
 
         {/* Менеджер профилей */}
         <section className="profiles-section">
           <h2>Менеджер профилей</h2>
-          
+
           <div className="input-group">
             <label htmlFor="subscription-url">URL подписки:</label>
             <input
@@ -195,7 +173,7 @@ export default function App() {
               id="subscription-url"
               value={subscriptionUrl}
               onChange={(e) => setSubscriptionUrl(e.target.value)}
-              placeholder="vless://user@server.com:443 или ss://base64data@server.com:8388"
+              placeholder="vless://uuid@server.com:443#name или ss://base64@server.com:8388#name"
             />
             <button onClick={handleAddSubscription}>Добавить</button>
           </div>
@@ -203,10 +181,17 @@ export default function App() {
           {profiles.length > 0 && (
             <div className="profiles-list">
               <h3>Доступные профили:</h3>
-              {profiles.map((profile, index) => (
-                <div key={index} className="profile-item">
-                  <span>{profile}</span>
-                  <button onClick={() => handleSelectProfile(profile)}>Выбрать</button>
+              {profiles.map((profile) => (
+                <div key={profile.id} className="profile-item">
+                  <span>
+                    {profile.name} ({profile.protocol} — {profile.server}:{profile.port})
+                  </span>
+                  <button
+                    onClick={() => handleSelectProfile(profile.id)}
+                    disabled={selectedProfileId === profile.id}
+                  >
+                    {selectedProfileId === profile.id ? 'Выбран' : 'Выбрать'}
+                  </button>
                 </div>
               ))}
             </div>
@@ -216,7 +201,7 @@ export default function App() {
         {/* Логирование */}
         <section className="logs-section">
           <h2>Логи (Sniffer)</h2>
-          
+
           <div className="log-controls">
             <button onClick={handleClearLogs}>Очистить логи</button>
           </div>

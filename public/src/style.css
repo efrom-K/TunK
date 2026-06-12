@@ -95,6 +95,14 @@ body {
   text-align: center;
 }
 
+.error-message {
+  background-color: var(--danger-color);
+  color: white;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+
 .status-indicator.disconnected { background-color: #6c757d; }
 .status-indicator.connecting { background-color: var(--warning-color); color: #333; }
 .status-indicator.connected { background-color: var(--success-color); }

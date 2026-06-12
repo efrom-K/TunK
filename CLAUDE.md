@@ -54,14 +54,18 @@ Wintun (`wintun.dll`) is required for the TUN adapter and is copied to the app d
 - `fake_ip_cache: DashMap<String, FakeIpCacheEntry>` plus mirrored `domain_to_fake_ip` / `fake_ip_to_domain` DashMaps for O(1) lookups in both directions
 - `logs: Arc<Mutex<Vec<LogEntry>>>` — capped ring buffer (max 100 entries) for the sniffer/event log UI
 - `profile_id: RwLock<Option<String>>` — currently selected proxy profile
+- `profiles: RwLock<Vec<ProxyProfile>>` — profiles parsed from the active subscription
+- `tunnel: Mutex<Option<WintunAdapter>>` — active Wintun adapter/session, set by `toggle_vpn`
 
-All cross-cutting mutation (status changes, stats updates, FakeIP cache writes, logging) goes through methods on `AppState` so locking stays centralized.
+All cross-cutting mutation (status changes, stats updates, FakeIP cache writes, profile list, logging) goes through methods on `AppState` so locking stays centralized. `VpnStatus` and `LogEntry` derive `Serialize`/`Deserialize` for Tauri IPC.
 
 ### Tauri commands (`src/commands.rs`, `src/main.rs`)
-Frontend <-> backend communication is exclusively through `#[tauri::command] async fn` handlers registered in `invoke_handler(tauri::generate_handler![...])`: `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`. Note `src/main.rs` and `src/commands.rs` currently define overlapping/duplicate command sets — when wiring new commands, register them in `main.rs`'s `generate_handler!` and keep the implementations in `commands.rs`.
+`src/main.rs` declares its own copy of all modules (mirroring `src/lib.rs`) because `#[tauri::command]` generates crate-local helper macros that `tauri::generate_handler!` must resolve in the same crate — so the binary target re-declares `mod commands; mod config; ...` rather than depending on `vpn_client_lib`. `src/Cargo.toml` has an explicit `[[bin]] name = "vpn-client" path = "main.rs"` (autobins does not pick this up because `[lib] path = "lib.rs"` is set).
+
+Each `#[tauri::command] async fn` in `commands.rs` is a thin wrapper (`State<'_, AppState>` -> `&AppState`) around a `*_impl(state: &AppState, ...)` function, so tests call the `_impl` functions directly without needing a real `tauri::State` (which has no public constructor). Commands registered via `invoke_handler(tauri::generate_handler![...])` in `main.rs`: `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`. `toggle_vpn` validates the selected profile, activates/deactivates a `WintunAdapter` stored in `state.tunnel`, and returns the resulting `VpnStatus`.
 
 ### Config (`src/config.rs`)
-`VpnConfig` aggregates `profiles: Vec<ProxyProfile>`, `SubscriptionConfig`, `DnsSettings` (FakeIP pool bounds `198.18.0.0`–`198.18.255.255`, DoH server `https://1.1.1.1/dns-query`), and `TunSettings` (interface name, MTU 9000, route metric). `ProxyProfile`/`ProtocolType` (Vless/Shadowsocks/Trojan) describe parsed subscription entries.
+`VpnConfig` aggregates `profiles: Vec<ProxyProfile>`, `SubscriptionConfig`, `DnsSettings` (FakeIP pool bounds `198.18.0.0`–`198.18.255.255`, DoH server `https://1.1.1.1/dns-query`), and `TunSettings` (interface name, MTU 9000, route metric). `ProxyProfile`/`ProtocolType` (Vless/Shadowsocks/Trojan) describe parsed subscription entries. `parse_subscription_url` parses `vless://`, `ss://` (base64 `method:password` userinfo, tried against multiple base64 engines), and `trojan://` URLs into a `ProxyProfile`, decoding the `#name` fragment via `percent-encoding`.
 
 ### Network layer (`src/network/`)
 - `dns.rs` — `FakeIpManager` (DashMap-based, allocates from `198.18.0.0/16`, bidirectional domain<->IP maps) and `DoHClient` (real `reqwest`-based resolution against `https://1.1.1.1/dns-query` with caching), wrapped together by `DnsEngine`.
@@ -70,10 +74,10 @@ Frontend <-> backend communication is exclusively through `#[tauri::command] asy
 
 ### Proxy layer (`src/proxy/`)
 - `obfuscation.rs` — `Obfuscator` with `ObfuscationMode::{ShadowsocksAead, Vless, Trojan}`; each mode prefixes payloads with a length header before encapsulation.
-- `sniffer.rs` — `TlsSniffer::analyze_tls_handshake` parses TLS Client Hello records (record type `0x16`) to extract the SNI extension without decrypting payload, used for FAKEIP -> real-domain logging/routing decisions.
+- `sniffer.rs` — `TlsSniffer::analyze_tls_handshake` parses a full TLS Client Hello (record header, handshake header, client_version, random, session_id, cipher_suites, compression_methods, extensions) to extract the SNI (`server_name`) extension without decrypting payload; covered by tests built from real Client-Hello-shaped byte sequences, used for FAKEIP -> real-domain logging/routing decisions.
 
 ### Frontend (`public/`)
-Despite the README calling for Vanilla TS, `package.json` and `public/src/App.tsx` pull in React — the frontend stack is in flux. Tauri events (`tauri::emitter`) are expected to stream sniffer log lines (`[HH:MM:SS] [FAKEIP] <fakeip> -> <domain> [PROXY]`) to a scrolling log table in the UI.
+React + TypeScript, built with Vite (`vite.config.ts` at repo root, `root: 'public'`, output to `../dist`). Entry point is `public/src/main.tsx` (`ReactDOM.createRoot`) rendering `public/src/App.tsx` into `public/index.html`'s `#app` div. `App.tsx` polls `get_vpn_status`, `get_speed_bps`, and `get_logs` every second via `invoke()` (no Tauri event emitters are wired up yet) and calls `toggle_vpn`, `add_subscription`, `set_profile`, `get_profiles` for user actions. `tauri.conf.json`'s `build.frontendDist` points at `../dist` (the Vite build output), with `devUrl` pointing at the Vite dev server.
 
 ## Coding conventions (from project brief)
 
