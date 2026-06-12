@@ -41,6 +41,16 @@ winapi = { version = "0.3", features = [
 wintun = "0.1"
 chrono = "0.4.44"
 
+# Криптография для протоколов прокси (Shadowsocks AEAD, Trojan)
+aead = "0.5"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+rand = "0.8"
+
 [dev-dependencies]
 tokio-test = "0.4"
 

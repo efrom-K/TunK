@@ -10,6 +10,7 @@ pub mod network {
 }
 
 pub mod proxy {
+    pub mod connector;
     pub mod obfuscation;
     pub mod sniffer;
 }
@@ -20,7 +21,10 @@ pub mod state;
 // Экспортируем типы из state для использования в других модулях
 pub use state::{VpnStatus, AppState};
 
-use commands::{add_subscription, get_logs, get_profiles, get_speed_bps, get_vpn_status, set_profile, toggle_vpn};
+use commands::{
+    add_subscription, get_logs, get_profiles, get_speed_bps, get_vpn_status, set_profile, test_profile_connection,
+    toggle_vpn,
+};
 
 /// Точка входа приложения Tauri. Вызывается из `main.rs`.
 ///
@@ -38,6 +42,7 @@ pub fn run() {
             set_profile,
             get_profiles,
             get_logs,
+            test_profile_connection,
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");

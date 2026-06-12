@@ -31,6 +31,8 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProxyProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
+  const [pingResults, setPingResults] = useState<Record<string, number | string>>({});
 
   // Опрос статуса, скорости и логов с бэкенда
   useEffect(() => {
@@ -101,6 +103,21 @@ export default function App() {
 
   const handleClearLogs = () => {
     setLogs([]);
+  };
+
+  const handleTestConnection = async (profileId: string) => {
+    setError(null);
+    setTestingProfileId(profileId);
+
+    try {
+      const ping = await invoke<number>('test_profile_connection', { profileId });
+      setPingResults((prev) => ({ ...prev, [profileId]: ping }));
+    } catch (err) {
+      setPingResults((prev) => ({ ...prev, [profileId]: 'Ошибка' }));
+      setError(String(err));
+    } finally {
+      setTestingProfileId(null);
+    }
   };
 
   const formatSpeed = (bps: number): string => {
@@ -185,7 +202,19 @@ export default function App() {
                 <div key={profile.id} className="profile-item">
                   <span>
                     {profile.name} ({profile.protocol} — {profile.server}:{profile.port})
+                    {pingResults[profile.id] !== undefined && (
+                      <span className="ping-result">
+                        {' '}
+                        {typeof pingResults[profile.id] === 'number' ? `${pingResults[profile.id]} мс` : pingResults[profile.id]}
+                      </span>
+                    )}
                   </span>
+                  <button
+                    onClick={() => handleTestConnection(profile.id)}
+                    disabled={testingProfileId === profile.id}
+                  >
+                    {testingProfileId === profile.id ? 'Проверка...' : 'Проверить'}
+                  </button>
                   <button
                     onClick={() => handleSelectProfile(profile.id)}
                     disabled={selectedProfileId === profile.id}

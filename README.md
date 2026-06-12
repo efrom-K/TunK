@@ -25,13 +25,15 @@ A high-performance, lightweight VPN client specifically optimized for **Windows 
 | :--- | :---: | :--- |
 | **FakeIP Manager** | ✅ Implemented | IP allocation from `198.18.0.0/16` pool; DashMap concurrency. |
 | **DNS Engine** | ✅ Implemented | `DoHClient` resolves via Cloudflare DoH JSON API with caching. |
-| **Obfuscation Module** | ✅ Implemented | Shadowsocks AEAD, VLESS, Trojan header obfuscation complete. |
+| **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real protocol crypto/handshakes live in `proxy/connector.rs`. |
+| **Proxy Connector** | ✅ Implemented | `proxy/connector.rs`: real VLESS request header, Trojan auth header (SHA224), and Shadowsocks AEAD (AES-128/256-GCM, ChaCha20-IetfPoly1305) with EVP_BytesToKey + HKDF-SHA1 key derivation; opens a TCP handshake to the profile's server. |
 | **TLS Sniffer** | ✅ Implemented | SNI parsing from real TLS Client Hello byte streams, covered by raw-byte tests. |
 | **Wintun TUN Interface** | ✅ Implemented | Adapter creation, session start and async packet loop via `wintun` crate. |
 | **System Tray (Win 11)** | ⚠️ Partial | Basic structure in place; menu actions to be completed. |
 | **Routing Logic** | ✅ Implemented | `route`/`netsh` based default-route and proxy-exclusion management. |
 | **Subscription Parsing** | ✅ Implemented | `vless://`, `ss://`, `trojan://` URL parsing into `ProxyProfile`. |
-| **Tauri Commands & UI** | ✅ Implemented | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs` wired to a React frontend. |
+| **Tauri Commands & UI** | ✅ Implemented | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to a React frontend. |
+| **TUN <-> Proxy Data Path** | ⬜ Not implemented | `packet_loop` does not yet parse IP/TCP headers, NAT, or forward through `ProxyConnector`; `toggle_vpn` brings up the Wintun adapter but routes no traffic yet. |
 
 ---
 
@@ -53,6 +55,7 @@ src/
 │   └── tun.rs           # Wintun adapter, session and packet loop
 │
 └── proxy/               # Traffic handling and security
+    ├── connector.rs     # Real VLESS/Trojan/Shadowsocks AEAD handshakes + TCP dial
     ├── obfuscation.rs   # Traffic obfuscation headers
     └── sniffer.rs       # TLS SNI sniffing and domain logging
 ```
@@ -185,7 +188,9 @@ v0.1.0 (Current Development Version)
 * ✅ [x] Deployed TLS sniffer for SNI parsing.
 * ✅ [x] Wintun TUN integration: adapter/session lifecycle, async packet loop, route management (Stage 3).
 * ✅ [x] SNI extraction validated against real TLS Client Hello byte streams, subscription URL parsing (vless/ss/trojan), full Tauri v2 command set wired to a React UI (Stage 4).
+* ✅ [x] Real VLESS/Trojan/Shadowsocks AEAD protocol handshakes and TCP connector, `test_profile_connection` command with ping display in UI (Stage 5).
 * ⬜ [ ] System tray full implementation.
+* ⬜ [ ] TUN packet parsing/NAT and forwarding through `ProxyConnector` (full data path).
 v0.0.1
 * ✅ [x] Project skeleton with Tauri v2 established.
 * ✅ [x] Configuration structures and profile serialization defined.

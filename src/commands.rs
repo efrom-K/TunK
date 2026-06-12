@@ -1,5 +1,6 @@
 use crate::config::{parse_subscription_url, ProxyProfile};
 use crate::network::tun::WintunAdapter;
+use crate::proxy::connector::ProxyConnector;
 use crate::state::LogEntry;
 use crate::{AppState, VpnStatus};
 use tauri::State;
@@ -119,6 +120,27 @@ pub async fn get_logs(state: State<'_, AppState>) -> Result<Vec<LogEntry>, Strin
     state.get_logs()
 }
 
+/// Проверяет соединение с сервером профиля: открывает TCP-соединение,
+/// выполняет хендшейк протокола (VLESS/Shadowsocks/Trojan) и измеряет
+/// задержку. Результат сохраняется в `ConnectionStats.ping`.
+#[tauri::command]
+pub async fn test_profile_connection(state: State<'_, AppState>, profile_id: String) -> Result<u64, String> {
+    test_profile_connection_impl(&state, &profile_id).await
+}
+
+async fn test_profile_connection_impl(state: &AppState, profile_id: &str) -> Result<u64, String> {
+    let profile = state
+        .find_profile(profile_id)?
+        .ok_or_else(|| format!("Профиль {} не найден", profile_id))?;
+
+    let ping = ProxyConnector::measure_latency(&profile).await.map_err(|e| e.to_string())?;
+
+    let stats = state.get_stats()?;
+    state.update_stats(ping, stats.download_speed_bps, stats.upload_speed_bps)?;
+
+    Ok(ping)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +255,28 @@ mod tests {
         let status = toggle_vpn_impl(&state, true).unwrap();
 
         assert_eq!(status, VpnStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn test_profile_connection_unknown_profile() {
+        let state = AppState::new();
+
+        let result = test_profile_connection_impl(&state, "missing").await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "требует рабочую подписку с реальным сервером и доступ в сеть"]
+    async fn test_profile_connection_real_server() {
+        let state = AppState::new();
+
+        let profiles = add_subscription_impl(&state, vless_url()).unwrap();
+        let profile_id = profiles[0].id.clone();
+
+        let ping = test_profile_connection_impl(&state, &profile_id).await.unwrap();
+
+        assert!(ping > 0 || ping == 0);
+        assert_eq!(state.get_stats().unwrap().ping, ping);
     }
 }
