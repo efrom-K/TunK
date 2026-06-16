@@ -30,7 +30,7 @@ A lightweight VPN client for Windows 11 built on **Tauri v2** (Rust backend + Va
 | **Tauri Commands & UI** | ✅ Done | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to the React frontend. |
 | **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real crypto lives in `proxy/connector.rs`. |
 | **toggle_vpn wiring** | ✅ Done | `toggle_vpn` activates Wintun, resolves the proxy IP, configures routing, spawns the DNS proxy and dispatch loop as `AbortHandle`-tracked tasks; on disconnect aborts tasks, restores routing, and clears FakeIP cache. |
-| **System Tray** | ⬜ TODO | Hide window on close, tray menu with Connect/Disconnect/Expand/Exit (Stage 5). |
+| **System Tray** | ✅ Done | `lib.rs` `.setup()` builds a `TrayIconBuilder` tray (32×32 RGBA icon, dark-blue "T" glyph). Context menu: Open / Connect / Disconnect / — / Exit. Left-click toggles window visibility. Window close is intercepted and redirected to hide. Exit performs graceful shutdown (abort tasks → restore routing → deactivate adapter). |
 
 ---
 
@@ -133,6 +133,27 @@ Current test count: **162 tests**, 0 failures, 7 ignored (wintun/admin/network).
 ---
 
 ## Changelog
+
+### v0.5.0 — System tray
+
+**`lib.rs`** (updated):
+- `.setup()` now calls `build_system_tray()`, which builds a `TrayIconBuilder` icon (32×32, programmatically generated RGBA, dark-blue background with a white "T" glyph).
+- Context menu items: **Открыть TunK** (show/focus window), **Подключить** (connect via `toggle_vpn_impl`), **Отключить** (disconnect), separator, **Выход** (graceful shutdown).
+- Left click on the tray icon toggles window visibility (show if hidden, hide if visible).
+- `.on_window_event()` intercepts `CloseRequested` — calls `api.prevent_close()` and hides the window, so the app stays in the tray.
+- **Выход** performs a clean shutdown: `abort_background_tasks()` → `restore_routing()` → `adapter.deactivate()` → `std::process::exit(0)`.
+- Connect/Disconnect tray actions spawn tokio tasks that call `commands::toggle_vpn_impl` (now `pub(crate)`).
+
+**`tauri.conf.json`** (updated):
+- Removed the `trayIcon` config section (which would create a second, handler-less tray icon alongside the one built in setup).
+- Added explicit `"label": "main"` to the window entry (required for `app.get_webview_window("main")`).
+- Removed `icons/icon.icns` from `bundle.icon` (macOS-only, not needed for the Windows target).
+
+**`src/icons/`** (new files):
+- `32x32.png` and `128x128.png` generated for the bundle configuration.
+- `icon.ico` regenerated as a minimal PNG-in-ICO container.
+
+---
 
 ### v0.4.0 — Full connect/disconnect lifecycle (toggle_vpn wiring)
 

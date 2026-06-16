@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "VPN Client",
+  "productName": "TunK VPN",
   "identifier": "com.vpn.client.windows11",
   "version": "0.1.0",
   "build": {
@@ -11,26 +11,21 @@
   },
   "app": {
     "withGlobalTauri": true,
-        "windows": [
-          {
-            "title": "VPN Client",
-            "width": 1024,
-            "height": 768,
-            "resizable": true,
-            "fullscreen": false,
-            "center": true,
-            "decorations": true,
-            "transparent": false
-          }
-        ],
+    "windows": [
+      {
+        "label": "main",
+        "title": "TunK VPN",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
     "security": {
       "csp": null
-    },
-    "trayIcon": {
-      "iconPath": "icons/icon.ico",
-      "iconAsTemplate": true,
-      "title": "TunK VPN",
-      "tooltip": "TunK VPN Client"
     }
   },
   "bundle": {
@@ -40,7 +35,6 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
     ]
   }

@@ -19,7 +19,7 @@ pub async fn toggle_vpn(state: State<'_, Arc<AppState>>, enable: bool) -> Result
     toggle_vpn_impl((*state).clone(), enable).await
 }
 
-async fn toggle_vpn_impl(state: Arc<AppState>, enable: bool) -> Result<VpnStatus, String> {
+pub(crate) async fn toggle_vpn_impl(state: Arc<AppState>, enable: bool) -> Result<VpnStatus, String> {
     if enable {
         let profile_id = state.get_profile_id().ok_or("Профиль не выбран")?;
         let profile = state
