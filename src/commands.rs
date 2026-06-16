@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use crate::config::{parse_subscription_url, ProxyProfile};
+use crate::config::{parse_singbox_json, parse_subscription_url, ProxyProfile};
 use crate::network::dispatch;
 use crate::network::dns::DnsProxy;
 use crate::network::tun::WintunAdapter;
@@ -216,6 +216,18 @@ pub async fn add_subscription(
 }
 
 fn add_subscription_impl(state: &AppState, url: &str) -> Result<Vec<ProxyProfile>, String> {
+    // Try sing-box JSON format first.
+    match parse_singbox_json(url) {
+        Ok(profiles) if !profiles.is_empty() => {
+            state.set_profiles(profiles.clone())?;
+            crate::config::save_profiles(&profiles).ok();
+            return Ok(profiles);
+        }
+        Ok(_) => {} // valid JSON but no VLESS outbounds — fall through to URL parsing
+        Err(_) => {} // not JSON — fall through to URL parsing
+    }
+
+    // Fall back to line-by-line URL parsing.
     let mut profiles = Vec::new();
 
     for line in url.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -227,7 +239,19 @@ fn add_subscription_impl(state: &AppState, url: &str) -> Result<Vec<ProxyProfile
     }
 
     state.set_profiles(profiles.clone())?;
+    crate::config::save_profiles(&profiles).ok();
     Ok(profiles)
+}
+
+/// Загружает сохранённые профили из персистентного хранилища при запуске приложения.
+pub fn load_saved_profiles_impl(state: &AppState) -> Result<(), String> {
+    match crate::config::load_profiles() {
+        Ok(profiles) if !profiles.is_empty() => {
+            state.set_profiles(profiles).map_err(|e| e.to_string())?;
+        }
+        _ => {} // No saved profiles or read error — silently ignore.
+    }
+    Ok(())
 }
 
 /// Возвращает текущий статус VPN-подключения.

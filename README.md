@@ -26,7 +26,10 @@ A lightweight VPN client for Windows 11 built on **Tauri v2** (Rust backend + Va
 | **Proxy Connector** | ✅ Done | Real VLESS / Trojan (SHA-224) / Shadowsocks AEAD (AES-128/256-GCM, ChaCha20-Poly1305) handshakes over TCP. |
 | **REALITY Handshake** | ✅ Done | `proxy/reality.rs` builds a TLS 1.3 ClientHello with REALITY-authenticated `session_id` (X25519 ECDH + HKDF-SHA256 + AES-256-GCM). `proxy/tls13.rs` completes the full TLS 1.3 key schedule, decrypts the server handshake, verifies server Finished (HMAC-SHA256), and derives application traffic keys. Wired into `ProxyConnector::connect` when `reality_public_key` is set. |
 | **TLS Sniffer** | ✅ Done | SNI extraction from raw TLS ClientHello bytes without decryption. |
-| **Subscription Parsing** | ✅ Done | `vless://`, `ss://`, `trojan://` URL parsing; REALITY `pbk`/`sid`/`sni`/`fp` query params decoded. |
+| **Subscription Parsing** | ✅ Done | `vless://`, `ss://`, `trojan://` URL parsing; REALITY `pbk`/`sid`/`sni`/`fp` query params decoded. Sing-box JSON format also supported. |
+| **Sing-box JSON parser** | ✅ Done | `parse_singbox_json` parses sing-box config JSON (array or single object), extracts VLESS outbounds with REALITY and TLS settings; deduplicates by `(server, port)`. |
+| **Subscription Persistence** | ✅ Done | `save_profiles` / `load_profiles` store parsed profiles in `%APPDATA%\TunKVPN\profiles.json`; profiles are restored on startup via `load_saved_profiles_impl`. |
+| **Plain TLS VLESS** | ✅ Done | `ProxyStream` enum wraps `TcpStream` or `TlsStream`; VLESS+TLS path uses `tokio-native-tls` for standard TLS handshake before sending the VLESS request header. |
 | **Tauri Commands & UI** | ✅ Done | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to the React frontend. |
 | **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real crypto lives in `proxy/connector.rs`. |
 | **toggle_vpn wiring** | ✅ Done | `toggle_vpn` activates Wintun, resolves the proxy IP, configures routing, spawns the DNS proxy and dispatch loop as `AbortHandle`-tracked tasks; on disconnect aborts tasks, restores routing, and clears FakeIP cache. |
@@ -139,11 +142,51 @@ cargo test -- --ignored --nocapture
 cargo test --lib proxy::connector -- --ignored --nocapture
 ```
 
-Current test count: **170 tests**, 0 failures, 8 ignored (wintun/admin/network).
+Current test count: **179 tests**, 0 failures, 8 ignored (wintun/admin/network).
 
 ---
 
 ## Changelog
+
+### v0.7.0 — Sing-box JSON parser, subscription persistence, plain TLS VLESS, flow cleanup
+
+**`src/config.rs`** (updated):
+- New `tls: bool` field on `ProxyProfile` (`#[serde(default)]`) — indicates plain TLS VLESS without REALITY.
+- `parse_vless_url` now populates `tls` from `security=tls` query param.
+- New `parse_singbox_json(json: &str) -> Result<Vec<ProxyProfile>, String>`:
+  - Accepts a sing-box JSON array or single config object.
+  - Extracts VLESS outbounds; populates REALITY fields from `realitySettings`, sets `tls = true` from `tlsSettings`; skips `freedom`/`blackhole`/`socks`/`http`/`dns` outbounds.
+  - Deduplicates by `(server, port)` pair; tolerant of missing/malformed entries.
+  - Returns `Err` only if the input is not valid JSON; returns empty `Vec` if no VLESS outbounds found.
+- New persistence helpers: `profiles_path()` → `%APPDATA%\TunKVPN\profiles.json`; `save_profiles(&[ProxyProfile])`; `load_profiles()` (returns empty Vec if file missing).
+- 9 new unit tests covering JSON parsing, deduplication, TLS flag, path extension, single-object input, invalid JSON error, and no-vless case.
+
+**`src/proxy/connector.rs`** (updated):
+- New `ProxyStream` enum: `Plain(TcpStream)` | `Tls(TlsStream<TcpStream>)` — implements `AsyncRead + AsyncWrite` via `Pin::new(s).poll_*` delegation.
+- `ProxyConnector::connect` return type changed from `Result<TcpStream>` to `Result<ProxyStream>`.
+- VLESS + REALITY path now returns `Ok(ProxyStream::Plain(inner))` (unchanged behavior).
+- New VLESS + TLS path: when `profile.tls == true`, performs `tokio-native-tls` handshake and returns `Ok(ProxyStream::Tls(...))`.
+- Trojan and Shadowsocks paths return `Ok(ProxyStream::Plain(tcp))`.
+- New test `test_proxy_stream_plain_wraps_tcp` — verifies `ProxyStream::Plain` is constructible with a loopback socket.
+
+**`src/network/dispatch.rs`** (updated):
+- Import `ProxyStream` from `proxy::connector`.
+- `FlowEntry` gains `last_active: Arc<AtomicU64>` (Unix timestamp seconds).
+- `open_flow` initialises `last_active` to `now_secs()` and passes a clone to the relay task.
+- `relay_flow` now accepts a `ProxyStream` via `ProxyConnector::connect`; splits with `tokio::io::split`; updates `last_active` on every inbound and outbound data chunk.
+- `run_dispatch` spawns an idle-flow cleanup task: every 60 s, retains only flows active within the last 300 s.
+
+**`src/commands.rs`** (updated):
+- `add_subscription_impl` tries `parse_singbox_json` first; if non-empty, uses those profiles; otherwise falls back to line-by-line URL parsing. Calls `save_profiles` (best-effort) after setting profiles.
+- New `load_saved_profiles_impl(state: &AppState) -> Result<(), String>`: calls `load_profiles()`, loads into `AppState` if non-empty.
+
+**`src/lib.rs`** (updated):
+- `.setup()` calls `commands::load_saved_profiles_impl` after `build_system_tray` to restore profiles on startup.
+
+**`src/build.rs`** (updated):
+- Uses `tauri_build::Attributes::WindowsAttributes::app_manifest` to embed a Windows application manifest requesting `requireAdministrator` execution level — UAC elevation prompt on launch.
+
+---
 
 ### v0.6.0 — Critical routing, DNS and port fixes (Stages 6–9)
 

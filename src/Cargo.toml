@@ -52,6 +52,8 @@ md-5 = "0.10"
 rand = "0.8"
 hmac = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+tokio-native-tls = "0.3"
+native-tls = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"

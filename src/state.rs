@@ -505,6 +505,7 @@ mod tests {
             sni: None,
             flow: None,
             fingerprint: None,
+            tls: false,
         }
     }
 

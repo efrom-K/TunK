@@ -11,6 +11,8 @@
 //! - открывать TCP-соединение до прокси-сервера и отправлять хендшейк.
 
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
@@ -22,7 +24,7 @@ use md5::Md5;
 use rand::RngCore;
 use sha1::Sha1;
 use sha2::{Digest, Sha224};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -30,6 +32,53 @@ use uuid::Uuid;
 use crate::config::{ProtocolType, ProxyProfile};
 use crate::proxy::reality::build_and_seal_client_hello;
 use crate::proxy::tls13::complete_tls13_handshake;
+
+/// A proxy connection — either a plain TCP stream or a TLS-wrapped one.
+/// Implements AsyncRead + AsyncWrite so the relay task treats both identically.
+pub enum ProxyStream {
+    Plain(TcpStream),
+    Tls(tokio_native_tls::TlsStream<TcpStream>),
+}
+
+impl AsyncRead for ProxyStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            ProxyStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ProxyStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ProxyStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            ProxyStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            ProxyStream::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            ProxyStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Длина тега аутентификации для всех поддерживаемых AEAD-шифров.
 const AEAD_TAG_LEN: usize = 16;
@@ -356,10 +405,11 @@ impl ProxyConnector {
 
     /// Подключается к `profile.server:profile.port` и выполняет хендшейк
     /// протокола профиля для соединения с `target:target_port`.
-    /// Возвращает установленный TCP-поток, готовый к передаче данных.
+    /// Возвращает `ProxyStream` (Plain TCP или TLS), готовый к передаче данных.
     /// Для VLESS-профилей с полем `reality_public_key` используется
     /// полный TLS 1.3 / REALITY handshake вместо plain TCP.
-    pub async fn connect(profile: &ProxyProfile, target: &TargetAddr, target_port: u16) -> Result<TcpStream> {
+    /// Для VLESS-профилей с `tls == true` используется стандартный TLS.
+    pub async fn connect(profile: &ProxyProfile, target: &TargetAddr, target_port: u16) -> Result<ProxyStream> {
         let addr = format!("{}:{}", profile.server, profile.port);
 
         let tcp = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(&addr))
@@ -386,14 +436,31 @@ impl ProxyConnector {
 
                     let mut tls = complete_tls13_handshake(tcp, hello).await?;
                     tls.send_app_data(&vless_req).await?;
-                    return Ok(tls.into_inner());
+                    return Ok(ProxyStream::Plain(tls.into_inner()));
+                }
+
+                if profile.tls {
+                    // ── VLESS + plain TLS path ────────────────────────────────
+                    let native = tokio_native_tls::native_tls::TlsConnector::new()
+                        .map_err(|e| anyhow!("TLS ошибка создания connector: {}", e))?;
+                    let connector = tokio_native_tls::TlsConnector::from(native);
+                    let sni = profile.sni.as_deref().unwrap_or(&profile.server);
+                    let mut tls_stream = connector
+                        .connect(sni, tcp)
+                        .await
+                        .map_err(|e| anyhow!("TLS handshake ошибка: {}", e))?;
+                    tls_stream
+                        .write_all(&vless_req)
+                        .await
+                        .map_err(|e| anyhow!("ошибка записи VLESS запроса: {}", e))?;
+                    return Ok(ProxyStream::Tls(tls_stream));
                 }
 
                 // ── Plain VLESS path ──────────────────────────────────────────
                 let mut stream = tcp;
                 stream.write_all(&vless_req).await?;
                 stream.flush().await?;
-                Ok(stream)
+                Ok(ProxyStream::Plain(stream))
             }
             ProtocolType::Trojan => {
                 let password = profile
@@ -404,7 +471,7 @@ impl ProxyConnector {
                 let mut stream = tcp;
                 stream.write_all(&request).await?;
                 stream.flush().await?;
-                Ok(stream)
+                Ok(ProxyStream::Plain(stream))
             }
             ProtocolType::Shadowsocks => {
                 let method = profile
@@ -422,7 +489,7 @@ impl ProxyConnector {
                 let mut stream = tcp;
                 stream.write_all(&sealed).await?;
                 stream.flush().await?;
-                Ok(stream)
+                Ok(ProxyStream::Plain(stream))
             }
         }
     }
@@ -491,6 +558,7 @@ mod tests {
             sni: None,
             flow: None,
             fingerprint: None,
+            tls: false,
         }
     }
 
@@ -509,6 +577,7 @@ mod tests {
             sni: None,
             flow: None,
             fingerprint: None,
+            tls: false,
         }
     }
 
@@ -527,6 +596,7 @@ mod tests {
             sni: None,
             flow: None,
             fingerprint: None,
+            tls: false,
         }
     }
 
@@ -807,5 +877,27 @@ mod tests {
     #[test]
     fn test_parse_reality_short_id_odd_hex() {
         assert!(parse_reality_short_id(Some("abc")).is_err()); // odd length
+    }
+
+    /// Verifies that `ProxyStream::Plain` wraps a TcpStream without network access.
+    /// Uses a loopback listener to obtain a real (but local) TcpStream.
+    #[tokio::test]
+    async fn test_proxy_stream_plain_wraps_tcp() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accept on one side, connect on the other side.
+        let server = tokio::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let stream = ProxyStream::Plain(tcp);
+
+        // Check that we can successfully construct the Plain variant.
+        assert!(matches!(stream, ProxyStream::Plain(_)));
+
+        // Clean up
+        let _ = server.await;
     }
 }

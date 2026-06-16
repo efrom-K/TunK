@@ -1,6 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,9 @@ pub struct ProxyProfile {
     /// TLS fingerprint для имитации клиента (`fp`), например `firefox`.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// Использовать обычный TLS (security=tls без REALITY).
+    #[serde(default)]
+    pub tls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +168,7 @@ fn parse_vless_url(original_url: &str, rest: &str) -> Result<ProxyProfile, Strin
         sni: params.get("sni").cloned(),
         flow: params.get("flow").cloned(),
         fingerprint: params.get("fp").cloned(),
+        tls: params.get("security").map(|s| s == "tls").unwrap_or(false),
     })
 }
 
@@ -195,6 +201,7 @@ fn parse_trojan_url(original_url: &str, rest: &str) -> Result<ProxyProfile, Stri
         sni: None,
         flow: None,
         fingerprint: None,
+        tls: false,
     })
 }
 
@@ -228,6 +235,7 @@ fn parse_shadowsocks_url(original_url: &str, rest: &str) -> Result<ProxyProfile,
         sni: None,
         flow: None,
         fingerprint: None,
+        tls: false,
     })
 }
 
@@ -286,6 +294,178 @@ fn extract_fragment_name(value: &str, default: &str) -> String {
             .unwrap_or_else(|_| default.to_string()),
         None => default.to_string(),
     }
+}
+
+/// Разбирает подписку в формате sing-box JSON (массив конфигов или один конфиг).
+/// Извлекает VLESS outbounds. Возвращает пустой Vec если JSON валиден, но VLESS не найден.
+/// Возвращает Err только если строка не является валидным JSON.
+pub fn parse_singbox_json(json: &str) -> Result<Vec<ProxyProfile>, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Невалидный JSON: {}", e))?;
+
+    let configs: Vec<&serde_json::Value> = match &root {
+        serde_json::Value::Array(arr) => arr.iter().collect(),
+        obj @ serde_json::Value::Object(_) => vec![obj],
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut profiles = Vec::new();
+    let mut seen: HashSet<(String, u16)> = HashSet::new();
+
+    for config in configs {
+        let outbounds = match config.get("outbounds").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        for outbound in outbounds {
+            let protocol = match outbound.get("protocol").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Skip non-VLESS and utility outbound types
+            match protocol {
+                "vless" => {}
+                "freedom" | "blackhole" | "socks" | "http" | "dns" => continue,
+                _ => continue,
+            }
+
+            // Parse VLESS settings
+            let vnext = outbound
+                .pointer("/settings/vnext")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first());
+
+            let vnext = match vnext {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let server = match vnext.get("address").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+
+            let port = match vnext.get("port").and_then(|v| v.as_u64()) {
+                Some(p) if p <= 65535 => p as u16,
+                _ => continue,
+            };
+
+            // Skip duplicates by (server, port)
+            if !seen.insert((server.clone(), port)) {
+                continue;
+            }
+
+            let uuid = vnext
+                .pointer("/users/0/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let flow = vnext
+                .pointer("/users/0/flow")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let tag = outbound
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&server)
+                .to_string();
+
+            // Parse stream settings
+            let security = outbound
+                .pointer("/streamSettings/security")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
+
+            let (reality_public_key, reality_short_id, sni, fingerprint, tls) = match security {
+                "reality" => {
+                    let rs = outbound.pointer("/streamSettings/realitySettings");
+                    let pbk = rs
+                        .and_then(|r| r.get("publicKey"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let sid = rs
+                        .and_then(|r| r.get("shortId"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let sni_val = rs
+                        .and_then(|r| r.get("serverName"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let fp = rs
+                        .and_then(|r| r.get("fingerprint"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    (pbk, sid, sni_val, fp, false)
+                }
+                "tls" => {
+                    let ts = outbound.pointer("/streamSettings/tlsSettings");
+                    let sni_val = ts
+                        .and_then(|t| t.get("serverName"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    (None, None, sni_val, None, true)
+                }
+                _ => (None, None, None, None, false),
+            };
+
+            profiles.push(ProxyProfile {
+                id: Uuid::new_v4().to_string(),
+                name: tag,
+                url: String::new(),
+                protocol: ProtocolType::Vless,
+                server,
+                port,
+                username: Some(uuid),
+                password: None,
+                reality_public_key,
+                reality_short_id,
+                sni,
+                flow,
+                fingerprint,
+                tls,
+            });
+        }
+    }
+
+    Ok(profiles)
+}
+
+/// Возвращает путь к файлу персистентных профилей (`%APPDATA%\TunKVPN\profiles.json`).
+fn profiles_path() -> PathBuf {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(base).join("TunKVPN").join("profiles.json")
+}
+
+/// Сохраняет список профилей в JSON-файл.
+pub fn save_profiles(profiles: &[ProxyProfile]) -> anyhow::Result<()> {
+    let path = profiles_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(profiles)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Загружает профили из JSON-файла. Возвращает пустой Vec если файл отсутствует.
+pub fn load_profiles() -> anyhow::Result<Vec<ProxyProfile>> {
+    let path = profiles_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let profiles: Vec<ProxyProfile> = serde_json::from_str(&content)?;
+    Ok(profiles)
 }
 
 /// Декодирует userinfo `ss://` подписки (`method:password`), пробуя несколько base64-вариантов.
@@ -349,6 +529,7 @@ mod tests {
             sni: None,
             flow: None,
             fingerprint: None,
+            tls: false,
         };
 
         let json = serde_json::to_string(&profile).unwrap();
@@ -451,5 +632,155 @@ mod tests {
         let result = parse_subscription_url("trojan://password@example.com:notaport");
 
         assert!(result.is_err());
+    }
+
+    // ─── parse_singbox_json tests ─────────────────────────────────────────────
+
+    fn singbox_reality_json() -> &'static str {
+        r#"[{
+            "outbounds": [{
+                "protocol": "vless",
+                "tag": "my-reality-node",
+                "settings": {
+                    "vnext": [{
+                        "address": "reality.example.com",
+                        "port": 443,
+                        "users": [{"id": "550e8400-e29b-41d4-a716-446655440000", "flow": "xtls-rprx-vision"}]
+                    }]
+                },
+                "streamSettings": {
+                    "security": "reality",
+                    "realitySettings": {
+                        "publicKey": "AbCdEf1234567890_-AbCdEf1234567890_-AbCdEf1234",
+                        "shortId": "ab12cd34",
+                        "serverName": "camouflage.example.com",
+                        "fingerprint": "firefox"
+                    }
+                }
+            }]
+        }]"#
+    }
+
+    #[test]
+    fn test_parse_singbox_json_vless_reality() {
+        let profiles = parse_singbox_json(singbox_reality_json()).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.name, "my-reality-node");
+        assert_eq!(p.server, "reality.example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.username.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(p.flow.as_deref(), Some("xtls-rprx-vision"));
+        assert_eq!(
+            p.reality_public_key.as_deref(),
+            Some("AbCdEf1234567890_-AbCdEf1234567890_-AbCdEf1234")
+        );
+        assert_eq!(p.reality_short_id.as_deref(), Some("ab12cd34"));
+        assert_eq!(p.sni.as_deref(), Some("camouflage.example.com"));
+        assert_eq!(p.fingerprint.as_deref(), Some("firefox"));
+        assert!(!p.tls);
+        assert!(matches!(p.protocol, ProtocolType::Vless));
+    }
+
+    #[test]
+    fn test_parse_singbox_json_skips_non_vless() {
+        let json = r#"[{
+            "outbounds": [
+                {"protocol": "freedom", "tag": "direct"},
+                {"protocol": "blackhole", "tag": "block"},
+                {"protocol": "socks", "tag": "socks-out"},
+                {"protocol": "http", "tag": "http-out"},
+                {"protocol": "dns", "tag": "dns-out"},
+                {
+                    "protocol": "vless",
+                    "tag": "real-vless",
+                    "settings": {
+                        "vnext": [{"address": "vless.example.com", "port": 443, "users": [{"id": "test-uuid"}]}]
+                    },
+                    "streamSettings": {"security": "none"}
+                }
+            ]
+        }]"#;
+        let profiles = parse_singbox_json(json).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "real-vless");
+    }
+
+    #[test]
+    fn test_parse_singbox_json_tls_sets_tls_flag() {
+        let json = r#"[{
+            "outbounds": [{
+                "protocol": "vless",
+                "tag": "tls-node",
+                "settings": {
+                    "vnext": [{"address": "tls.example.com", "port": 8443, "users": [{"id": "tls-uuid"}]}]
+                },
+                "streamSettings": {
+                    "security": "tls",
+                    "tlsSettings": {"serverName": "tls.example.com"}
+                }
+            }]
+        }]"#;
+        let profiles = parse_singbox_json(json).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles[0].tls);
+        assert_eq!(profiles[0].sni.as_deref(), Some("tls.example.com"));
+        assert!(profiles[0].reality_public_key.is_none());
+    }
+
+    #[test]
+    fn test_parse_singbox_json_invalid_json_returns_err() {
+        let result = parse_singbox_json("not valid json {{{");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_singbox_json_no_vless_returns_empty() {
+        let json = r#"[{"outbounds": [{"protocol": "freedom", "tag": "direct"}]}]"#;
+        let profiles = parse_singbox_json(json).unwrap();
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn test_parse_singbox_json_deduplicates_by_server_port() {
+        let json = r#"[{
+            "outbounds": [
+                {
+                    "protocol": "vless", "tag": "node1",
+                    "settings": {"vnext": [{"address": "dup.example.com", "port": 443, "users": [{"id": "u1"}]}]},
+                    "streamSettings": {"security": "none"}
+                },
+                {
+                    "protocol": "vless", "tag": "node2",
+                    "settings": {"vnext": [{"address": "dup.example.com", "port": 443, "users": [{"id": "u2"}]}]},
+                    "streamSettings": {"security": "none"}
+                }
+            ]
+        }]"#;
+        let profiles = parse_singbox_json(json).unwrap();
+        // second entry with same (server, port) must be deduped
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "node1");
+    }
+
+    #[test]
+    fn test_parse_singbox_json_single_object_not_array() {
+        let json = r#"{
+            "outbounds": [{
+                "protocol": "vless",
+                "tag": "single-obj",
+                "settings": {"vnext": [{"address": "single.example.com", "port": 1234, "users": [{"id": "uid"}]}]},
+                "streamSettings": {"security": "none"}
+            }]
+        }"#;
+        let profiles = parse_singbox_json(json).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].server, "single.example.com");
+    }
+
+    #[test]
+    fn test_profiles_path_has_json_extension() {
+        let path = super::profiles_path();
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
     }
 }

@@ -40,6 +40,8 @@ pub fn run() {
         .manage(Arc::new(AppState::new()))
         .setup(|app| {
             build_system_tray(app)?;
+            let state = app.state::<Arc<AppState>>();
+            commands::load_saved_profiles_impl(&**state).ok();
             Ok(())
         })
         // Hide the window instead of closing it — the tray keeps the app alive.

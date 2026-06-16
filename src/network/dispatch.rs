@@ -5,6 +5,7 @@
 //! that bridges the TUN session and the proxy TCP stream bidirectionally.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -14,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::config::ProxyProfile;
-use crate::proxy::connector::{ProxyConnector, TargetAddr};
+use crate::proxy::connector::{ProxyConnector, ProxyStream, TargetAddr};
 use crate::state::AppState;
 
 // ─── TCP flag bitmasks ────────────────────────────────────────────────────────
@@ -44,9 +45,18 @@ struct FlowMsg {
 
 struct FlowEntry {
     tx: mpsc::Sender<FlowMsg>,
+    last_active: Arc<AtomicU64>,
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
+
+/// Returns the current time as Unix timestamp in seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// Reads packets from `session` and dispatches each TCP flow destined for the
 /// FakeIP range (198.18.0.0/16) to a proxy relay task.
@@ -54,6 +64,19 @@ struct FlowEntry {
 /// Returns when `session.shutdown()` is called (receive_blocking returns Err).
 pub async fn run_dispatch(session: Arc<wintun::Session>, state: Arc<AppState>) -> Result<()> {
     let flows: Arc<DashMap<FlowKey, FlowEntry>> = Arc::new(DashMap::new());
+
+    // Spawn idle-flow cleanup task: remove flows not active for > 300 s.
+    let flows_cleanup = flows.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let now = now_secs();
+            flows_cleanup.retain(|_, entry| {
+                now.saturating_sub(entry.last_active.load(Ordering::Relaxed)) < 300
+            });
+        }
+    });
 
     loop {
         let session_c = session.clone();
@@ -168,10 +191,12 @@ async fn open_flow(
     );
     write_tun(session, &synack)?;
 
-    // Create channel and record flow entry
+    // Create channel and record flow entry with last_active timestamp.
     let (tx, rx) = mpsc::channel::<FlowMsg>(128);
     let key_c = key.clone();
-    flows.insert(key, FlowEntry { tx });
+    let last_active = Arc::new(AtomicU64::new(now_secs()));
+    let last_active_c = last_active.clone();
+    flows.insert(key, FlowEntry { tx, last_active });
 
     // Spawn the relay task
     let session_c = session.clone();
@@ -187,6 +212,7 @@ async fn open_flow(
             our_isn.wrapping_add(1),
             client_next,
             rx, session_c, state_c,
+            last_active_c,
         ).await {
             let _ = state_log.log("WARN", &format!("relay: {}", e));
         }
@@ -210,8 +236,9 @@ async fn relay_flow(
     mut rx: mpsc::Receiver<FlowMsg>,
     session: Arc<wintun::Session>,
     state: Arc<AppState>,
+    last_active: Arc<AtomicU64>,
 ) -> Result<()> {
-    let stream = match ProxyConnector::connect(&profile, &target, dst_port).await {
+    let proxy_stream: ProxyStream = match ProxyConnector::connect(&profile, &target, dst_port).await {
         Ok(s) => s,
         Err(e) => {
             // Signal connection failure with a RST
@@ -224,7 +251,7 @@ async fn relay_flow(
         }
     };
 
-    let (mut proxy_rx, mut proxy_tx) = stream.into_split();
+    let (mut pr, mut pw) = tokio::io::split(proxy_stream);
     let mut buf = [0u8; 8192];
 
     loop {
@@ -234,7 +261,7 @@ async fn relay_flow(
                 match msg {
                     None => break, // flow removed (FIN/RST) or channel closed
                     Some(FlowMsg { seq, payload }) => {
-                        proxy_tx.write_all(&payload).await?;
+                        pw.write_all(&payload).await?;
                         // ACK the client's data
                         client_next = seq.wrapping_add(payload.len() as u32);
                         let ack = build_tcp(
@@ -242,6 +269,7 @@ async fn relay_flow(
                             our_seq, client_next, TCP_ACK, 65535, &[],
                         );
                         write_tun(&session, &ack)?;
+                        last_active.store(now_secs(), Ordering::Relaxed);
                         if let Ok(mut stats) = state.stats.write() {
                             stats.upload_speed_bps =
                                 stats.upload_speed_bps.saturating_add(payload.len() as u64);
@@ -250,7 +278,7 @@ async fn relay_flow(
                 }
             }
             // proxy → TUN direction
-            n = proxy_rx.read(&mut buf) => {
+            n = pr.read(&mut buf) => {
                 match n {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
@@ -263,6 +291,7 @@ async fn relay_flow(
                             write_tun(&session, &pkt)?;
                             our_seq = our_seq.wrapping_add(chunk.len() as u32);
                         }
+                        last_active.store(now_secs(), Ordering::Relaxed);
                         if let Ok(mut stats) = state.stats.write() {
                             stats.download_speed_bps =
                                 stats.download_speed_bps.saturating_add(n as u64);
