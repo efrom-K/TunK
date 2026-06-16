@@ -208,6 +208,33 @@ impl RouteManager {
             Err(anyhow!("route delete завершился с кодом ошибки: {:?}", status.code()))
         }
     }
+
+    /// Добавляет два маршрута `0.0.0.0/1` и `128.0.0.0/1` через `via`.
+    ///
+    /// Вместе они покрывают всё IPv4-пространство с длиной префикса /1, что гарантированно
+    /// перебивает любой существующий маршрут `0.0.0.0/0` по правилу longest-prefix match —
+    /// без зависимости от метрик. Это стандартный «split-default» трюк VPN-клиентов.
+    pub fn add_split_default_route(via: Ipv4Addr, metric: u32) -> Result<()> {
+        let half_mask = Ipv4Addr::new(128, 0, 0, 0);
+        Self::add_route(Ipv4Addr::new(0, 0, 0, 0), half_mask, via, metric)
+            .context("Не удалось добавить split-default маршрут 0.0.0.0/1")?;
+        Self::add_route(Ipv4Addr::new(128, 0, 0, 0), half_mask, via, metric)
+            .context("Не удалось добавить split-default маршрут 128.0.0.0/1")?;
+        Ok(())
+    }
+
+    /// Удаляет оба split-default маршрута, добавленных [`add_split_default_route`].
+    /// Оба удаления выполняются всегда — ошибки объединяются и возвращаются вместе.
+    pub fn delete_split_default_route() -> Result<()> {
+        let half_mask = Ipv4Addr::new(128, 0, 0, 0);
+        let e1 = Self::delete_route(Ipv4Addr::new(0, 0, 0, 0), half_mask).err();
+        let e2 = Self::delete_route(Ipv4Addr::new(128, 0, 0, 0), half_mask).err();
+        match (e1, e2) {
+            (None, None) => Ok(()),
+            (Some(e), None) | (None, Some(e)) => Err(e),
+            (Some(e1), Some(e2)) => Err(anyhow!("{}; {}", e1, e2)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +355,25 @@ Network Destination        Netmask          Gateway       Interface  Metric
             args,
             vec!["interface", "ip", "set", "address", "vpn-tun", "dhcp"]
         );
+    }
+
+    #[test]
+    fn test_split_default_covers_full_ipv4_space() {
+        // 0.0.0.0/1  covers 0x00000000 – 0x7FFFFFFF
+        // 128.0.0.0/1 covers 0x80000000 – 0xFFFFFFFF
+        // Together they cover all 2^32 IPv4 addresses and win over any /0 default
+        // route by longest-prefix match, regardless of metrics.
+        let half_mask = u32::from(Ipv4Addr::new(128, 0, 0, 0));
+        let low_net  = u32::from(Ipv4Addr::new(0, 0, 0, 0))   & half_mask;
+        let high_net = u32::from(Ipv4Addr::new(128, 0, 0, 0)) & half_mask;
+        assert_eq!(low_net,  0);
+        assert_eq!(high_net, 0x80000000);
+        // Every address matches exactly one of the two /1 prefixes.
+        for addr_u32 in [0u32, 1, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF] {
+            let in_low  = (addr_u32 & half_mask) == low_net;
+            let in_high = (addr_u32 & half_mask) == high_net;
+            assert!(in_low ^ in_high, "addr {:#010x} must match exactly one /1", addr_u32);
+        }
     }
 
     #[test]

@@ -114,22 +114,34 @@ impl WintunAdapter {
             .map_err(|e| anyhow!("Не удалось получить индекс адаптера: {}", e))
     }
 
-    /// Настраивает таблицу маршрутизации Windows: делает Wintun-интерфейс
-    /// маршрутом по умолчанию и добавляет исключение для прокси-сервера,
-    /// чтобы избежать петли маршрутизации.
+    /// Настраивает таблицу маршрутизации Windows:
+    /// 1. Добавляет /32 маршрут-исключение для прокси-сервера через реальный шлюз
+    ///    (чтобы сам трафик до прокси не ушёл в туннель и не образовал петлю).
+    /// 2. Устанавливает метрику Wintun-интерфейса в 1 (наивысший приоритет).
+    /// 3. Добавляет split-default (0.0.0.0/1 + 128.0.0.0/1 через TUN_ADDRESS),
+    ///    которые гарантированно перебивают реальный 0.0.0.0/0 по longest-prefix match.
     pub fn configure_routing(&self, proxy_server: Ipv4Addr) -> Result<()> {
         let interface_index = self.get_adapter_index()?;
         let gateway = RouteManager::get_default_gateway()?;
 
         RouteManager::add_route(proxy_server, HOST_MASK, gateway, EXCLUSION_METRIC)?;
         RouteManager::set_interface_metric(interface_index, TUNNEL_METRIC)?;
+        RouteManager::add_split_default_route(TUN_ADDRESS, TUNNEL_METRIC)?;
 
         Ok(())
     }
 
-    /// Удаляет маршрут-исключение прокси-сервера, добавленный в [`configure_routing`].
+    /// Откатывает изменения маршрутизации, сделанные в [`configure_routing`]:
+    /// удаляет /32 маршрут-исключение прокси и оба split-default маршрута.
+    /// Оба удаления выполняются всегда, ошибки объединяются.
     pub fn restore_routing(&self, proxy_server: Ipv4Addr) -> Result<()> {
-        RouteManager::delete_route(proxy_server, HOST_MASK)
+        let e1 = RouteManager::delete_route(proxy_server, HOST_MASK).err();
+        let e2 = RouteManager::delete_split_default_route().err();
+        match (e1, e2) {
+            (None, None) => Ok(()),
+            (Some(e), None) | (None, Some(e)) => Err(e),
+            (Some(e1), Some(e2)) => Err(anyhow!("{}; {}", e1, e2)),
+        }
     }
 
     /// Returns the active Wintun session, or an error if not yet activated.
