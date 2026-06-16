@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,23 @@ const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 /// Маска подсети FakeIP-пула (`/16`).
 const TUN_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 0, 0);
 
+/// Находит `wintun.dll` на диске.
+///
+/// Сначала проверяет директорию запущенного исполняемого файла — именно туда
+/// Tauri копирует ресурсы при сборке и установке. Если там нет — возвращает
+/// просто имя файла, и ОС ищет его сама через PATH / CWD.
+fn locate_wintun_dll() -> OsString {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("wintun.dll");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+    OsString::from("wintun.dll")
+}
+
 /// Активная сессия Wintun: адаптер должен жить не меньше, чем связанная с ним сессия.
 struct WintunSession {
     adapter: Arc<wintun::Adapter>,
@@ -55,8 +73,10 @@ impl WintunAdapter {
     /// Загружает драйвер wintun.dll, открывает (или создаёт) виртуальный адаптер
     /// и запускает сессию обмена пакетами.
     pub fn activate(&self) -> Result<()> {
-        // SAFETY: загружается стандартный подписанный wintun.dll из текущей директории.
-        let wintun = unsafe { wintun::load() }.map_err(|e| anyhow!("Не удалось загрузить wintun.dll: {}", e))?;
+        // SAFETY: загружается стандартный подписанный wintun.dll; путь выбирается
+        // функцией locate_wintun_dll() — сначала рядом с exe, затем PATH/CWD.
+        let wintun = unsafe { wintun::load_from_path(locate_wintun_dll()) }
+            .map_err(|e| anyhow!("Не удалось загрузить wintun.dll: {}", e))?;
 
         let adapter = match wintun::Adapter::open(&wintun, WINTUN_POOL, &self.interface_name) {
             Ok(adapter) => adapter,
@@ -192,6 +212,14 @@ impl WintunAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_locate_wintun_dll_filename() {
+        let path = locate_wintun_dll();
+        let s = path.to_string_lossy();
+        // Regardless of which search path is chosen, must end with "wintun.dll".
+        assert!(s.ends_with("wintun.dll"), "unexpected path: {}", s);
+    }
 
     #[test]
     fn test_tun_address_constants() {

@@ -110,7 +110,18 @@ tauri dev      # hot-reload dev server
 tauri build    # production bundle
 ```
 
-**Requirements:** Windows 10/11 64-bit, Rust 1.75+, Node.js 18+, `wintun.dll` in the app directory (administrator privileges required for TUN interface creation).
+**Requirements:** Windows 10/11 64-bit, Rust 1.75+, Node.js 18+, administrator privileges.
+
+### wintun.dll
+
+`wintun.dll` is required for the TUN adapter but is not committed to the repo (it is gitignored). You must obtain it separately:
+
+1. Download the latest Wintun release from **<https://www.wintun.net>**
+2. Extract `wintun.dll` (x64 build) and place it next to the compiled executable:
+   - **Development** (`tauri dev` / `cargo build`): copy to `src/target/debug/vpn-client.exe`'s directory, i.e. `src/target/debug/wintun.dll`
+   - **Production** (`tauri build`): copy to `src/wintun.dll` before running the bundler — Tauri copies resources listed in `bundle.resources` into the installer next to the executable
+
+`WintunAdapter::activate()` uses `locate_wintun_dll()` which searches the running executable's directory first, then falls back to the OS PATH/CWD search. In a production bundle the DLL is placed next to the exe automatically.
 
 ---
 
@@ -128,11 +139,32 @@ cargo test -- --ignored --nocapture
 cargo test --lib proxy::connector -- --ignored --nocapture
 ```
 
-Current test count: **162 tests**, 0 failures, 7 ignored (wintun/admin/network).
+Current test count: **170 tests**, 0 failures, 8 ignored (wintun/admin/network).
 
 ---
 
 ## Changelog
+
+### v0.6.0 — Critical routing, DNS and port fixes (Stages 6–9)
+
+**`network/tun.rs`** (updated):
+- `activate()` now assigns static IP `198.18.0.1/16` to the Wintun interface via `netsh interface ip set address` — without this the OS had no subnet route pointing at the adapter.
+- `configure_routing()` extended with three additional steps: split-default routes `0.0.0.0/1` + `128.0.0.0/1` (override real `0.0.0.0/0` by LPM); DNS `127.0.0.1` on the TUN interface (Windows DNS Client picks lowest-metric interface first); `ipconfig /flushdns` (best-effort).
+- `restore_routing()` now also removes split-default routes, clears TUN DNS, and flushes the cache.
+- `deactivate()` calls `clear_interface_address` (best-effort) to remove the stale static IP.
+- `locate_wintun_dll()` searches the running executable's directory first, then falls back to OS PATH/CWD — covers both development and Tauri production bundles.
+
+**`network/route.rs`** (updated):
+- New helpers: `set_interface_address` / `clear_interface_address`, `set_interface_dns` / `clear_interface_dns`, `flush_dns_cache`, `add_split_default_route` / `delete_split_default_route`.
+
+**`commands.rs`** (updated):
+- `ensure_dns_port_free()`: binds `127.0.0.1:53`; if occupied, stops `Dnscache` service and polls up to 2 s for release. Called in `toggle_vpn_impl` before spawning the DNS proxy.
+- `restore_dnscache()`: best-effort `sc start Dnscache` on disconnect.
+
+**`tauri.conf.json`** (updated):
+- `bundle.resources` array added — add `"wintun.dll"` here when building a production installer with the DLL present.
+
+---
 
 ### v0.5.0 — System tray
 
