@@ -42,6 +42,8 @@ subscriptions.json
 profiles.json
 vpn-config.json
 *.profile.json
+local_subscription*
+.local/
 
 # --- IDE / editor ---
 .vscode/

@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use anyhow::Result;
 use serde::Deserialize;
+use tokio::net::UdpSocket;
+
+use crate::state::AppState;
 
 /// Начало пула FakeIP (198.18.0.0)
 const POOL_START: u32 = 0xC612_0000;
@@ -209,6 +213,167 @@ impl DnsEngine {
     }
 }
 
+/// Перехватчик DNS-запросов на базе UDP.
+///
+/// На A-запросы отвечает FakeIP из пула 198.18.0.0/16 и пишет маппинг в `AppState`.
+/// На все прочие типы (AAAA и т.д.) возвращает NXDOMAIN, чтобы клиенты
+/// использовали только IPv4 FakeIP-адреса.
+pub struct DnsProxy {
+    bind_addr: SocketAddr,
+    allocator: Arc<FakeIpManager>,
+}
+
+impl DnsProxy {
+    pub fn new(bind_addr: SocketAddr) -> Self {
+        Self {
+            bind_addr,
+            allocator: Arc::new(FakeIpManager::new()),
+        }
+    }
+
+    /// Запускает цикл приёма DNS-запросов. Завершается только при фатальной ошибке сокета.
+    ///
+    /// Если передан `ready_tx`, отправляет в него фактический адрес после привязки —
+    /// полезно в тестах при `bind` на порт 0.
+    pub async fn run(
+        self,
+        state: Arc<AppState>,
+        ready_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+    ) -> Result<()> {
+        let socket = Arc::new(
+            UdpSocket::bind(self.bind_addr)
+                .await
+                .map_err(|e| anyhow::anyhow!("DNS proxy: не удалось привязать {} — {}", self.bind_addr, e))?,
+        );
+
+        let bound_addr = socket.local_addr()?;
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(bound_addr);
+        }
+        state.log("INFO", &format!("DNS proxy слушает {}", bound_addr)).ok();
+
+        loop {
+            let mut buf = [0u8; 512];
+            let (len, src) = match socket.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    state.log("ERROR", &format!("DNS recv_from: {}", e)).ok();
+                    continue;
+                }
+            };
+
+            let query = buf[..len].to_vec();
+            let socket_clone = socket.clone();
+            let state_clone = state.clone();
+            let allocator_clone = self.allocator.clone();
+
+            tokio::spawn(async move {
+                if let Some(resp) = handle_dns_query(&query, &state_clone, &allocator_clone) {
+                    let _ = socket_clone.send_to(&resp, src).await;
+                }
+            });
+        }
+    }
+}
+
+/// Обрабатывает один DNS-запрос: A → FakeIP, прочие → NXDOMAIN.
+fn handle_dns_query(query: &[u8], state: &AppState, allocator: &FakeIpManager) -> Option<Vec<u8>> {
+    let (tx_id, domain, qtype) = parse_dns_question(query)?;
+
+    if qtype != 1 {
+        return Some(build_nxdomain_response(query, tx_id));
+    }
+
+    let fake_ip = if let Some(existing) = state.domain_to_fake_ip.get(&domain) {
+        existing.clone()
+    } else {
+        let ip = allocator.resolve_to_fake_ip(&domain).ok()?;
+        state.domain_to_fake_ip.insert(domain.clone(), ip.clone());
+        state.fake_ip_to_domain.insert(ip.clone(), domain.clone());
+        state.log("INFO", &format!("[FAKEIP] {} -> {}", domain, ip)).ok();
+        ip
+    };
+
+    build_a_response(query, tx_id, &fake_ip)
+}
+
+/// Разбирает заголовок и секцию вопроса DNS-пакета.
+/// Возвращает `(tx_id, domain, qtype)` или `None` при любом нарушении формата.
+fn parse_dns_question(buf: &[u8]) -> Option<(u16, String, u16)> {
+    if buf.len() < 12 {
+        return None;
+    }
+    let tx_id = u16::from_be_bytes([buf[0], buf[1]]);
+    if u16::from_be_bytes([buf[4], buf[5]]) == 0 {
+        return None; // QDCOUNT = 0
+    }
+
+    let mut offset = 12;
+    let mut labels: Vec<String> = Vec::new();
+
+    loop {
+        if offset >= buf.len() {
+            return None;
+        }
+        let label_len = buf[offset] as usize;
+        if label_len == 0 {
+            offset += 1;
+            break;
+        }
+        // Compression pointers (0xC0..) не встречаются в клиентских запросах
+        if label_len > 63 || offset + 1 + label_len > buf.len() {
+            return None;
+        }
+        labels.push(
+            String::from_utf8_lossy(&buf[offset + 1..offset + 1 + label_len]).to_lowercase(),
+        );
+        offset += 1 + label_len;
+    }
+
+    if labels.is_empty() || offset + 4 > buf.len() {
+        return None;
+    }
+    let qtype = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+    Some((tx_id, labels.join("."), qtype))
+}
+
+/// Строит DNS A-ответ с FakeIP.
+fn build_a_response(query: &[u8], tx_id: u16, fake_ip: &str) -> Option<Vec<u8>> {
+    let ip: Ipv4Addr = fake_ip.parse().ok()?;
+    let question = &query[12..];
+
+    let mut resp = Vec::with_capacity(12 + question.len() + 16);
+    resp.extend_from_slice(&tx_id.to_be_bytes());
+    resp.extend_from_slice(&[0x81, 0x80]); // QR=1, RD=1, RA=1, RCODE=0
+    resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+    resp.extend_from_slice(&[0x00, 0x01]); // ANCOUNT=1
+    resp.extend_from_slice(&[0x00, 0x00]); // NSCOUNT=0
+    resp.extend_from_slice(&[0x00, 0x00]); // ARCOUNT=0
+    resp.extend_from_slice(question);
+    resp.extend_from_slice(&[0xC0, 0x0C]); // NAME: compressed ptr к offset 12
+    resp.extend_from_slice(&[0x00, 0x01]); // TYPE: A
+    resp.extend_from_slice(&[0x00, 0x01]); // CLASS: IN
+    resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // TTL: 1 сек
+    resp.extend_from_slice(&[0x00, 0x04]); // RDLENGTH: 4 байта
+    resp.extend_from_slice(&ip.octets());
+
+    Some(resp)
+}
+
+/// Строит DNS NXDOMAIN-ответ (RCODE=3, записей нет).
+fn build_nxdomain_response(query: &[u8], tx_id: u16) -> Vec<u8> {
+    let question = &query[12..];
+    let mut resp = Vec::with_capacity(12 + question.len());
+    resp.extend_from_slice(&tx_id.to_be_bytes());
+    resp.extend_from_slice(&[0x81, 0x83]); // QR=1, RD=1, RA=1, RCODE=3
+    resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+    resp.extend_from_slice(&[0x00, 0x00]); // ANCOUNT=0
+    resp.extend_from_slice(&[0x00, 0x00]); // NSCOUNT=0
+    resp.extend_from_slice(&[0x00, 0x00]); // ARCOUNT=0
+    resp.extend_from_slice(question);
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +499,187 @@ mod tests {
         let engine = DnsEngine::new();
         assert!(engine.fake_ip.allocate_ip().is_ok());
         assert!(!engine.doh.has_cache("example.com"));
+    }
+
+    // ── DnsProxy helpers ─────────────────────────────────────────────────────
+
+    /// Собирает минимальный DNS-запрос для `domain` с заданным `qtype`.
+    fn build_query(tx_id: u16, domain: &str, qtype: u16) -> Vec<u8> {
+        let mut q = Vec::new();
+        q.extend_from_slice(&tx_id.to_be_bytes());
+        q.extend_from_slice(&[0x01, 0x00]); // flags: RD=1
+        q.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+        q.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // AN/NS/AR=0
+        for label in domain.split('.') {
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.push(0x00); // конец QNAME
+        q.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
+        q.extend_from_slice(&[0x00, 0x01]);         // QCLASS: IN
+        q
+    }
+
+    #[test]
+    fn test_parse_dns_question_a_record() {
+        let query = build_query(0xABCD, "example.com", 1);
+        let (tx_id, domain, qtype) = parse_dns_question(&query).unwrap();
+        assert_eq!(tx_id, 0xABCD);
+        assert_eq!(domain, "example.com");
+        assert_eq!(qtype, 1);
+    }
+
+    #[test]
+    fn test_parse_dns_question_subdomain() {
+        let query = build_query(0x0001, "sub.example.com", 1);
+        let (_, domain, _) = parse_dns_question(&query).unwrap();
+        assert_eq!(domain, "sub.example.com");
+    }
+
+    #[test]
+    fn test_parse_dns_question_aaaa() {
+        let query = build_query(0x0002, "example.com", 28);
+        let (_, domain, qtype) = parse_dns_question(&query).unwrap();
+        assert_eq!(domain, "example.com");
+        assert_eq!(qtype, 28);
+    }
+
+    #[test]
+    fn test_parse_dns_question_too_short() {
+        assert!(parse_dns_question(&[0x00, 0x01]).is_none());
+        assert!(parse_dns_question(&[]).is_none());
+    }
+
+    #[test]
+    fn test_parse_dns_question_zero_qdcount() {
+        let mut query = build_query(0x0001, "example.com", 1);
+        // Перезапишем QDCOUNT = 0
+        query[4] = 0x00;
+        query[5] = 0x00;
+        assert!(parse_dns_question(&query).is_none());
+    }
+
+    #[test]
+    fn test_build_a_response_structure() {
+        let query = build_query(0x1234, "example.com", 1);
+        let resp = build_a_response(&query, 0x1234, "198.18.0.5").unwrap();
+
+        // Заголовок
+        assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0x1234); // tx_id
+        assert_eq!(resp[2], 0x81); // QR=1, RD=1
+        assert_eq!(resp[3] & 0x0F, 0x00); // RCODE=0
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1); // ANCOUNT=1
+
+        // Последние 4 байта — IPv4-адрес
+        let ip_bytes = &resp[resp.len() - 4..];
+        assert_eq!(ip_bytes, &[198, 18, 0, 5]);
+    }
+
+    #[test]
+    fn test_build_a_response_invalid_ip() {
+        let query = build_query(0x0001, "example.com", 1);
+        assert!(build_a_response(&query, 0x0001, "not-an-ip").is_none());
+    }
+
+    #[test]
+    fn test_build_nxdomain_response_rcode() {
+        let query = build_query(0xBEEF, "example.com", 28);
+        let resp = build_nxdomain_response(&query, 0xBEEF);
+
+        assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xBEEF);
+        assert_eq!(resp[3] & 0x0F, 0x03); // RCODE=3 (NXDOMAIN)
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0); // ANCOUNT=0
+    }
+
+    #[test]
+    fn test_handle_dns_query_a_allocates_fake_ip() {
+        let state = AppState::new();
+        let allocator = FakeIpManager::new();
+        let query = build_query(0x0001, "github.com", 1);
+
+        let resp = handle_dns_query(&query, &state, &allocator).unwrap();
+
+        // ANCOUNT=1
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1);
+        // IP в диапазоне 198.18.0.0/16
+        let ip = &resp[resp.len() - 4..];
+        assert_eq!(ip[0], 198);
+        assert_eq!(ip[1], 18);
+    }
+
+    #[test]
+    fn test_handle_dns_query_aaaa_returns_nxdomain() {
+        let state = AppState::new();
+        let allocator = FakeIpManager::new();
+        let query = build_query(0x0002, "github.com", 28);
+
+        let resp = handle_dns_query(&query, &state, &allocator).unwrap();
+
+        assert_eq!(resp[3] & 0x0F, 0x03); // RCODE=3
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0); // ANCOUNT=0
+    }
+
+    #[test]
+    fn test_handle_dns_query_same_domain_same_ip() {
+        let state = AppState::new();
+        let allocator = FakeIpManager::new();
+        let query = build_query(0x0001, "example.com", 1);
+
+        let resp1 = handle_dns_query(&query, &state, &allocator).unwrap();
+        let resp2 = handle_dns_query(&query, &state, &allocator).unwrap();
+
+        assert_eq!(&resp1[resp1.len() - 4..], &resp2[resp2.len() - 4..]);
+    }
+
+    #[test]
+    fn test_handle_dns_query_writes_to_appstate() {
+        let state = AppState::new();
+        let allocator = FakeIpManager::new();
+        let query = build_query(0x0001, "example.com", 1);
+
+        handle_dns_query(&query, &state, &allocator).unwrap();
+
+        assert!(state.domain_to_fake_ip.contains_key("example.com"));
+        let fake_ip = state.domain_to_fake_ip.get("example.com").unwrap().clone();
+        assert_eq!(
+            state.fake_ip_to_domain.get(&fake_ip).unwrap().clone(),
+            "example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dns_proxy_full_roundtrip() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let state = Arc::new(AppState::new());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let state_proxy = state.clone();
+        tokio::spawn(async move {
+            DnsProxy::new("127.0.0.1:0".parse().unwrap())
+                .run(state_proxy, Some(tx))
+                .await
+                .ok();
+        });
+
+        let bound_addr = timeout(Duration::from_secs(1), rx).await.unwrap().unwrap();
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let query = build_query(0xCAFE, "proxy-test.example.com", 1);
+        client.send_to(&query, bound_addr).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (len, _) = timeout(Duration::from_secs(1), client.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let resp = &buf[..len];
+        assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xCAFE);
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1); // ANCOUNT=1
+        assert_eq!(resp[resp.len() - 4], 198);
+        assert_eq!(resp[resp.len() - 3], 18);
+        assert!(state.domain_to_fake_ip.contains_key("proxy-test.example.com"));
     }
 }

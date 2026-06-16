@@ -1,210 +1,200 @@
-# 🛡️ TunK VPN Client for Windows 11
+# TunK VPN Client for Windows 11
 
-🌆 MIT License  |  ⚙️ Rust Backend  |  💎 Tauri v2 Frontend
+MIT License | Rust Backend | Tauri v2 Frontend
 
-> **⚠️ STATUS: UNDER ACTIVE DEVELOPMENT**  
-> This project is currently in active development. Some core features are fully implemented, while others are placeholders for future implementation. Please read the [Architecture Overview](#-architecture-overview) before building.
-
----
-
-## 📋 Project Overview
-
-A high-performance, lightweight VPN client specifically optimized for **Windows 11**. Built on the robust **Tauri v2** stack, this application leverages a Rust backend for maximum safety and performance, paired with a Vanilla TypeScript frontend.
-
-### Core Capabilities
-- 🔒 **FakeIP Manager**: Intelligent IP allocation from reserved pools (`198.18.0.0/16`) with `DashMap` concurrency support.
-- 🌐 **DNS Engine**: DoH client structure ready with advanced DNS interception logic.
-- 🕵️ **TLS Sniffer**: Parses SNI (Server Name Indication) from TLS Client Hello packets without decrypting payload traffic.
-- 🛡️ **Obfuscation Module**: Implements Shadowsocks AEAD, VLESS, and Trojan header obfuscation to bypass deep packet inspection.
+> **STATUS: UNDER ACTIVE DEVELOPMENT**
+> Core data path is fully implemented. See the status table below for what works vs. what is planned.
 
 ---
 
-## 🎯 Implementation Status
+## Project Overview
+
+A lightweight VPN client for Windows 11 built on **Tauri v2** (Rust backend + Vanilla TypeScript frontend), inspired by sing-box and happ. It intercepts DNS queries via a FakeIP engine, routes all traffic through a Wintun TUN adapter, and proxies TCP flows to VLESS / Trojan / Shadowsocks AEAD servers — including servers behind the **REALITY TLS camouflage** protocol.
+
+---
+
+## Implementation Status
 
 | Component | Status | Notes |
 | :--- | :---: | :--- |
-| **FakeIP Manager** | ✅ Implemented | IP allocation from `198.18.0.0/16` pool; DashMap concurrency. |
-| **DNS Engine** | ✅ Implemented | `DoHClient` resolves via Cloudflare DoH JSON API with caching. |
-| **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real protocol crypto/handshakes live in `proxy/connector.rs`. |
-| **Proxy Connector** | ✅ Implemented | `proxy/connector.rs`: real VLESS request header, Trojan auth header (SHA224), and Shadowsocks AEAD (AES-128/256-GCM, ChaCha20-IetfPoly1305) with EVP_BytesToKey + HKDF-SHA1 key derivation; opens a TCP handshake to the profile's server. |
-| **TLS Sniffer** | ✅ Implemented | SNI parsing from real TLS Client Hello byte streams, covered by raw-byte tests. |
-| **Wintun TUN Interface** | ✅ Implemented | Adapter creation, session start and async packet loop via `wintun` crate. |
-| **System Tray (Win 11)** | ⚠️ Partial | Basic structure in place; menu actions to be completed. |
-| **Routing Logic** | ✅ Implemented | `route`/`netsh` based default-route and proxy-exclusion management. |
-| **Subscription Parsing** | ✅ Implemented | `vless://`, `ss://`, `trojan://` URL parsing into `ProxyProfile`. |
-| **Tauri Commands & UI** | ✅ Implemented | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to a React frontend. |
-| **TUN <-> Proxy Data Path** | ⬜ Not implemented | `packet_loop` does not yet parse IP/TCP headers, NAT, or forward through `ProxyConnector`; `toggle_vpn` brings up the Wintun adapter but routes no traffic yet. |
+| **FakeIP Manager** | ✅ Done | IP allocation from `198.18.0.0/16`; DashMap bidirectional maps. |
+| **DNS Proxy** | ✅ Done | `DnsProxy` listens on UDP 127.0.0.1:53, returns FakeIPs for A queries, NXDOMAIN for AAAA; writes mappings to `AppState`. |
+| **DoH Client** | ✅ Done | Resolves via `https://1.1.1.1/dns-query` with an in-memory cache. |
+| **Wintun TUN Adapter** | ✅ Done | Adapter/session lifecycle; `get_session()` exposes the raw session for the dispatch loop. |
+| **Routing Management** | ✅ Done | `route`/`netsh` default-route and proxy-exclusion management. |
+| **Packet Dispatch Loop** | ✅ Done | `network/dispatch.rs`: parses IPv4+TCP headers, maintains a per-flow table (DashMap keyed by 4-tuple), opens a proxy connection for every SYN to the FakeIP range, splices TUN ↔ proxy bidirectionally, and updates download/upload stats. |
+| **Proxy Connector** | ✅ Done | Real VLESS / Trojan (SHA-224) / Shadowsocks AEAD (AES-128/256-GCM, ChaCha20-Poly1305) handshakes over TCP. |
+| **REALITY Handshake** | ✅ Done | `proxy/reality.rs` builds a TLS 1.3 ClientHello with REALITY-authenticated `session_id` (X25519 ECDH + HKDF-SHA256 + AES-256-GCM). `proxy/tls13.rs` completes the full TLS 1.3 key schedule, decrypts the server handshake, verifies server Finished (HMAC-SHA256), and derives application traffic keys. Wired into `ProxyConnector::connect` when `reality_public_key` is set. |
+| **TLS Sniffer** | ✅ Done | SNI extraction from raw TLS ClientHello bytes without decryption. |
+| **Subscription Parsing** | ✅ Done | `vless://`, `ss://`, `trojan://` URL parsing; REALITY `pbk`/`sid`/`sni`/`fp` query params decoded. |
+| **Tauri Commands & UI** | ✅ Done | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to the React frontend. |
+| **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real crypto lives in `proxy/connector.rs`. |
+| **toggle_vpn wiring** | ⬜ TODO | `toggle_vpn` needs to start the DNS listener + dispatch loop + configure routing and store `JoinHandle`s for shutdown (Stage 4). |
+| **System Tray** | ⬜ TODO | Hide window on close, tray menu with Connect/Disconnect/Expand/Exit (Stage 5). |
 
 ---
 
-## 🛠️ Architecture Overview
+## Architecture
 
-The project follows a clean separation of concerns between the Rust backend (logic) and the Frontend (UI).
-
-```text
+```
 src/
-├── main.rs              # Tauri v2 application entry point
-├── commands.rs          # Tauri command handlers (toggle_vpn, add_subscription)
-├── state.rs             # Thread-safe application state management
-├── config.rs            # Configuration structures and serialization
+├── main.rs              # Thin shim — calls vpn_client_lib::run()
+├── lib.rs               # Tauri entry point + generate_handler!
+├── commands.rs          # #[tauri::command] thin wrappers over *_impl fns
+├── state.rs             # AppState (RwLock/DashMap/Mutex), VpnStatus, ConnectionStats
+├── config.rs            # ProxyProfile, VpnConfig, parse_subscription_url
 │
-├── lib.rs               # Library module exports
-├── network/             # Network layer components
-│   ├── dns.rs           # FakeIpManager + DoH resolver
-│   ├── route.rs         # Windows routing table parsing & netsh/route management
-│   └── tun.rs           # Wintun adapter, session and packet loop
+├── network/
+│   ├── dispatch.rs      # IPv4/TCP dispatch loop: FakeIP→proxy relay, flow table, stats
+│   ├── dns.rs           # FakeIpManager, DoHClient, DnsProxy (UDP listener)
+│   ├── route.rs         # Windows route print / netsh parsing and management
+│   └── tun.rs           # WintunAdapter: activate/deactivate/packet_loop/get_session
 │
-└── proxy/               # Traffic handling and security
-    ├── connector.rs     # Real VLESS/Trojan/Shadowsocks AEAD handshakes + TCP dial
-    ├── obfuscation.rs   # Traffic obfuscation headers
-    └── sniffer.rs       # TLS SNI sniffing and domain logging
+└── proxy/
+    ├── connector.rs     # ProxyConnector::connect, ShadowsocksCipher, REALITY path
+    ├── reality.rs       # build_and_seal_client_hello → RealityClientHello
+    ├── tls13.rs         # complete_tls13_handshake, Tls13Stream, key schedule
+    ├── obfuscation.rs   # Obfuscator (length-prefix framing, scaffolding)
+    └── sniffer.rs       # TlsSniffer::analyze_tls_handshake (SNI extraction)
 ```
+
+### Data path (fully implemented)
+
+```
+OS TCP packet
+  └─▶ Wintun TUN (tun.rs)
+        └─▶ packet_loop → dispatch::run_dispatch (dispatch.rs)
+              ├─ parse IPv4+TCP header
+              ├─ SYN to 198.18.x.x → look up domain in AppState.fake_ip_to_domain
+              │     └─▶ ProxyConnector::connect (connector.rs)
+              │           ├─ plain VLESS / Trojan / Shadowsocks
+              │           └─ VLESS+REALITY → build_and_seal_client_hello (reality.rs)
+              │                               └─▶ complete_tls13_handshake (tls13.rs)
+              └─ data packets → relay task: TUN ↔ proxy TcpStream, update stats
+```
+
+### DNS path (fully implemented)
+
+```
+OS DNS query (UDP 127.0.0.1:53)
+  └─▶ DnsProxy::run (dns.rs)
+        ├─ A query  → allocate FakeIP from 198.18.0.0/16
+        │              write to AppState.fake_ip_to_domain + domain_to_fake_ip
+        │              return synthetic A response
+        └─ AAAA / other → NXDOMAIN
+```
+
 ---
 
-## 📦 System Requirements
+## Build
 
-To build and run the application, ensure your environment meets the following criteria:
-
-* **OS:** Windows 10/11 (64-bit)
-* **Rust:** Version 1.75 or higher
-* **Driver:** Wintun.dll (Included in release builds; requires Admin privileges for installation)
-* **Privileges:** Administrator rights are required for creating the TUN interface.
-
-## 🚀 Installation & Build Instructions
-* **1. Prerequisites:** Install Rust Toolchain
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-* **2. Clone the Repository**
-```bash
-git clone https://github.com/yourusername/vpn-client.git
-cd vpn-client
-```
-* **3. Build the Application**
-You need both Rust and Node.js toolchains installed to build a Tauri app.
-
-Build Backend (Rust):
+> All `cargo` commands must be run from inside `src/`.
 
 ```bash
-cargo build --release
-Build Frontend (via Tauri):
-```
-```bash
-# Install npm dependencies
-npm install
-# Run in Development mode (Hot reload)
-tauri dev
-# Build Production Release
-tauri build
-```
-Note on Wintun: The wintun.dll driver is automatically copied to the application directory on first run. For manual installation, download the official driver from the WireGuard repository.
-## 🧪 Testing & Quality Assurance
-### Unit Tests
-Run all unit tests for the Rust backend:
-
-```bash
+# Backend
+cd src
+cargo build
 cargo test
-```
-Or target specific modules:
 
-```bash
-cargo test --package vpn-client --lib network::dns
-cargo test --package vpn-client --lib proxy::obfuscation
-```
-### Test Coverage
-Analyze coverage with tarpaulin:
+# Run a specific test module
+cargo test --lib network::dispatch
+cargo test --lib proxy::reality
+cargo test --lib proxy::connector
 
-```bash
-cargo tarpaulin --out Html
-```
-### Current Coverage Metrics
-| Module | Status | Notes |
-| :--- | :---: | :--- |
-| network/dns.rs | ✅ 100% | IP allocation, collision prevention, reverse resolution. |
-| proxy/obfuscation.rs | ✅ 95% | AEAD header logic, packet length validation. |
-| state.rs | ✅ 100% | Logging, status management, profiles, concurrent access. |
-| proxy/sniffer.rs | ✅ 95% | TLS record detection, SNI extraction from real Client Hello bytes. |
-| config.rs | ✅ 100% | Subscription URL parsing for vless/ss/trojan. |
-| commands.rs | ✅ 100% | Tauri command handlers (status, speed, profiles, logs, toggle). |
+# Run a single test by name
+cargo test test_fake_ip_allocation
 
-## 📁 Project Structure (Root)
-```text
-vpn-client/
-├── .gitignore
-├── Cargo.toml              # Rust dependencies
-├── tauri.conf.json         # Tauri configuration
-├── LICENSE                 # MIT License
-├── README.md               # This file
-├── src/                    # Rust Backend Source
-│   ├── main.rs
-│   ├── commands.rs
-│   ├── state.rs
-│   ├── config.rs
-│   ├── lib.rs
-│   ├── network/            # DNS & TUN logic
-│   └── proxy/              # Obfuscation & Sniffing
-├── public/                 # Frontend source (Vite root)
-│   ├── index.html
-│   └── src/                # React + TypeScript
-│       ├── App.tsx
-│       ├── main.tsx
-│       └── style.css
-├── dist/                   # Vite production build output (frontendDist)
-├── icons/                  # Application icons
-├── vite.config.ts          # Vite build configuration
-├── tsconfig.json           # TypeScript configuration
-└── package.json            # NPM dependencies & scripts
+# Full Tauri app (from repo root)
+npm install
+tauri dev      # hot-reload dev server
+tauri build    # production bundle
 ```
+
+**Requirements:** Windows 10/11 64-bit, Rust 1.75+, Node.js 18+, `wintun.dll` in the app directory (administrator privileges required for TUN interface creation).
+
 ---
 
-## ⚠️ Important Security Notes
-### 🔒 Traffic Obfuscation
-* **AEAD Encryption:** All packets pass through Shadowsocks AEAD with a 2-byte length header.
-* **Privacy First:** SNI is masked during DoH requests to protect user privacy.
-### 🛡️ FakeIP Isolation
-* **Reserved Pool:** The pool 198.18.0.0/16 strictly does not overlap with public IP ranges, ensuring no collision with real internet infrastructure.
-* **Concurrency Safety:** Uses DashMap to ensure thread-safe storage without blocking locks under high load.
-### 🔍 TLS Sniffer Capabilities
-* **Non-Intrusive:** The sniffer operates only at the SNI extension level of the TLS handshake.
-* **Encrypted Payload:** Real traffic remains encrypted; only the target domain name is logged for routing purposes.
+## Testing
 
-## 📞 Support & Issues
-* **GitHub Issues:** Open an issue for bugs or feature requests.
-* **Email:** efimromancenko@gmail.com
+```bash
+# All unit tests — no admin or network access required
+cd src && cargo test
 
-## ⚖️ Development Ethics
-We are committed to ethical, transparent, and safe development:
+# Tests that need wintun.dll + admin
+cargo test -- --ignored --nocapture
 
-* **Transparency:** All code is open-source; tests run in CI before release.
-* **Safety:*** No .unwrap() or .expect() calls in production code paths; all errors handled via Result.
-* **Privacy:** Logs strictly exclude sensitive user data (no personal IP addresses logged).
-* **Openness:** MIT license permits commercial use with proper attribution.
+# Tests against a real proxy subscription
+# Put proxy URLs (one per line) in .local/local_subscription.txt (gitignored)
+cargo test --lib proxy::connector -- --ignored --nocapture
+```
 
-## 📜 Changelog
-v0.1.0 (Current Development Version)
-* ✅ [x] Implemented FakeIpManager with DashMap concurrency support.
-* ✅ [x] Completed DNS engine structure and DoH client integration.
-* ✅ [x] Added traffic obfuscation headers (Shadowsocks AEAD, VLESS, Trojan).
-* ✅ [x] Deployed TLS sniffer for SNI parsing.
-* ✅ [x] Wintun TUN integration: adapter/session lifecycle, async packet loop, route management (Stage 3).
-* ✅ [x] SNI extraction validated against real TLS Client Hello byte streams, subscription URL parsing (vless/ss/trojan), full Tauri v2 command set wired to a React UI (Stage 4).
-* ✅ [x] Real VLESS/Trojan/Shadowsocks AEAD protocol handshakes and TCP connector, `test_profile_connection` command with ping display in UI (Stage 5).
-* ⬜ [ ] System tray full implementation.
-* ⬜ [ ] TUN packet parsing/NAT and forwarding through `ProxyConnector` (full data path).
-v0.0.1
-* ✅ [x] Project skeleton with Tauri v2 established.
-* ✅ [x] Configuration structures and profile serialization defined.
+Current test count: **160 tests**, 0 failures, 7 ignored (wintun/admin/network).
 
-## Future Roadmap
- * VLESS Protocol: Full client transport implementation for VLESS.
- * Advanced TLS 1.3 Sniffer: Optional deep decryption module (Opt-in only).
- * GUI Routing: Visual configuration via netsh GUI.
- * Subscription Manager: Import/Export functionality for JSON/YAML configs.
- * Performance Dashboard: Real-time stats and monitoring UI.
-
-## 📜 Acknowledgments
-🤝 Tauri Team for the incredible framework enabling seamless native desktop apps.
-⚡ WireGuard/Wintun developers for robust TUN driver support.
-💪 Rust Community for language reliability and memory safety guarantees.
 ---
-Built with a commitment to security, performance, and ethical development practices.
+
+## Changelog
+
+### v0.3.0 — Packet dispatch loop + REALITY TLS 1.3
+
+**`network/dispatch.rs`** (new):
+- Full IPv4/TCP packet dispatch loop reading from a Wintun session.
+- `DashMap` flow table keyed by `(src_ip, src_port, dst_ip, dst_port)`.
+- On TCP SYN to the FakeIP range (`198.18.0.0/16`): looks up the real domain from `AppState.fake_ip_to_domain`, selects the active proxy profile, sends a synthetic SYN-ACK, and spawns a relay task.
+- Relay task calls `ProxyConnector::connect`, then splices the proxy `TcpStream` ↔ Wintun session bidirectionally — ACKs are sent back to the OS, downstream data is chunked (≤1400 bytes) into PSH+ACK packets.
+- `AppState` stats (download/upload bps) updated on every relay tick.
+- RFC 1071 IP + TCP checksums; IPv4/TCP header builder and parser; 9 unit tests.
+
+**`proxy/tls13.rs`** (new):
+- `complete_tls13_handshake(TcpStream, RealityClientHello) → Tls13Stream`.
+- Sends the REALITY ClientHello as a TLS record (outer version 0x0301 for middlebox compatibility).
+- Reads and parses ServerHello; extracts the cipher suite and X25519 `key_share`.
+- Full RFC 8446 HKDF key schedule: `HKDF-Extract` chain (early → handshake → master), `HKDF-Expand-Label` for traffic secrets, per-direction keys, IVs, and finished keys.
+- Decrypts server handshake records (AES-128-GCM or ChaCha20-Poly1305), verifies server Finished via HMAC-SHA256.
+- Sends client Finished encrypted with the client handshake write key.
+- Derives application traffic keys; returns a `Tls13Stream` implementing `AsyncRead + AsyncWrite` with per-direction AEAD + sequence counters.
+- 13 unit tests (AEAD roundtrip for both cipher suites, key schedule vectors, record format, parsing helpers).
+
+**`proxy/connector.rs`** (updated):
+- When a VLESS profile has `reality_public_key` set: calls `build_and_seal_client_hello`, then `complete_tls13_handshake`, sends the VLESS request header as TLS application data, returns the inner `TcpStream`.
+- `parse_reality_pubkey` — base64url-decodes the `pbk` field to `[u8; 32]`.
+- `parse_reality_short_id` — hex-decodes the `sid` field to `Vec<u8>` (0–8 bytes).
+- 7 new tests for both helpers.
+
+**`network/tun.rs`** (updated):
+- `packet_loop` signature changed from `Arc<Mutex<VpnState>>` to `Arc<AppState>`.
+- `get_session() → Result<Arc<wintun::Session>>` added for use by the dispatch loop.
+- Dead `VpnState` local struct removed.
+
+### v0.2.0 — DNS proxy
+
+- `network/dns.rs`: `DnsProxy` UDP listener, DNS wire-format parser/builder, `handle_dns_query`, 13 tests including a full UDP round-trip test.
+
+### v0.1.0 — Core foundation
+
+- FakeIP Manager, DoH client, Wintun adapter lifecycle, Windows routing management.
+- Full Tauri command set wired to a React frontend.
+- Real VLESS / Trojan / Shadowsocks AEAD handshakes (`proxy/connector.rs`).
+- REALITY ClientHello builder (`proxy/reality.rs`).
+- TLS sniffer (SNI extraction), subscription URL parser with REALITY query params.
+
+---
+
+## Security Notes
+
+- **REALITY camouflage**: The TLS 1.3 ClientHello is indistinguishable from a legitimate browser handshake to a DPI system. The REALITY server verifies the encrypted `session_id` to authenticate the client.
+- **FakeIP isolation**: The `198.18.0.0/16` pool does not overlap with public IP space; DashMap ensures lock-free concurrent writes under load.
+- **No unwrap in production paths**: errors are propagated via `anyhow::Result<T>` or `thiserror`-derived types throughout.
+- **Wintun**: requires a Microsoft-signed driver and administrator privileges; TUN creation is gated behind `activate()`.
+
+---
+
+## Support
+
+- GitHub Issues: open an issue for bugs or feature requests.
+- Email: efimromancenko@gmail.com
+
+---
+
+## License
+
+MIT — see `LICENSE`.

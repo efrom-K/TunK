@@ -464,6 +464,11 @@ mod tests {
             port: 443,
             username: Some("uuid".to_string()),
             password: None,
+            reality_public_key: None,
+            reality_short_id: None,
+            sni: None,
+            flow: None,
+            fingerprint: None,
         }
     }
 

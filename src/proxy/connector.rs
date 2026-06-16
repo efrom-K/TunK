@@ -28,6 +28,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::config::{ProtocolType, ProxyProfile};
+use crate::proxy::reality::build_and_seal_client_hello;
+use crate::proxy::tls13::complete_tls13_handshake;
 
 /// Длина тега аутентификации для всех поддерживаемых AEAD-шифров.
 const AEAD_TAG_LEN: usize = 16;
@@ -355,10 +357,12 @@ impl ProxyConnector {
     /// Подключается к `profile.server:profile.port` и выполняет хендшейк
     /// протокола профиля для соединения с `target:target_port`.
     /// Возвращает установленный TCP-поток, готовый к передаче данных.
+    /// Для VLESS-профилей с полем `reality_public_key` используется
+    /// полный TLS 1.3 / REALITY handshake вместо plain TCP.
     pub async fn connect(profile: &ProxyProfile, target: &TargetAddr, target_port: u16) -> Result<TcpStream> {
         let addr = format!("{}:{}", profile.server, profile.port);
 
-        let mut stream = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(&addr))
+        let tcp = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(&addr))
             .await
             .map_err(|_| anyhow!("таймаут подключения к {}", addr))?
             .map_err(|e| anyhow!("не удалось подключиться к {}: {}", addr, e))?;
@@ -369,9 +373,27 @@ impl ProxyConnector {
                     .username
                     .as_deref()
                     .ok_or_else(|| anyhow!("в профиле VLESS отсутствует UUID"))?;
-                let uuid = Uuid::parse_str(uuid_str).map_err(|e| anyhow!("некорректный UUID VLESS: {}", e))?;
-                let request = build_vless_request(&uuid, target, target_port)?;
-                stream.write_all(&request).await?;
+                let uuid = Uuid::parse_str(uuid_str)
+                    .map_err(|e| anyhow!("некорректный UUID VLESS: {}", e))?;
+                let vless_req = build_vless_request(&uuid, target, target_port)?;
+
+                if let Some(pbk_b64) = &profile.reality_public_key {
+                    // ── VLESS + REALITY path ──────────────────────────────────
+                    let server_pubkey = parse_reality_pubkey(pbk_b64)?;
+                    let short_id = parse_reality_short_id(profile.reality_short_id.as_deref())?;
+                    let sni = profile.sni.as_deref().unwrap_or(&profile.server);
+                    let hello = build_and_seal_client_hello(sni, &server_pubkey, &short_id)?;
+
+                    let mut tls = complete_tls13_handshake(tcp, hello).await?;
+                    tls.send_app_data(&vless_req).await?;
+                    return Ok(tls.into_inner());
+                }
+
+                // ── Plain VLESS path ──────────────────────────────────────────
+                let mut stream = tcp;
+                stream.write_all(&vless_req).await?;
+                stream.flush().await?;
+                Ok(stream)
             }
             ProtocolType::Trojan => {
                 let password = profile
@@ -379,7 +401,10 @@ impl ProxyConnector {
                     .as_deref()
                     .ok_or_else(|| anyhow!("в профиле Trojan отсутствует пароль"))?;
                 let request = build_trojan_request(password, target, target_port)?;
+                let mut stream = tcp;
                 stream.write_all(&request).await?;
+                stream.flush().await?;
+                Ok(stream)
             }
             ProtocolType::Shadowsocks => {
                 let method = profile
@@ -394,12 +419,12 @@ impl ProxyConnector {
                 let mut cipher = ShadowsocksCipher::new(method, password)?;
                 let address_request = build_socks_address(target, target_port)?;
                 let sealed = cipher.seal(&address_request)?;
+                let mut stream = tcp;
                 stream.write_all(&sealed).await?;
+                stream.flush().await?;
+                Ok(stream)
             }
         }
-
-        stream.flush().await?;
-        Ok(stream)
     }
 
     /// Измеряет время установления соединения и выполнения хендшейка
@@ -412,9 +437,41 @@ impl ProxyConnector {
     }
 }
 
+// ─── REALITY parameter helpers ───────────────────────────────────────────────
+
+/// Decodes a base64url X25519 public key (`pbk` field) into 32 bytes.
+fn parse_reality_pubkey(b64: &str) -> Result<[u8; 32]> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|e| anyhow!("REALITY pbk base64 decode: {}", e))?;
+    if bytes.len() != 32 {
+        return Err(anyhow!("REALITY pbk must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Decodes a hex short_id (`sid` field, up to 8 bytes) into bytes.
+fn parse_reality_short_id(sid: Option<&str>) -> Result<Vec<u8>> {
+    let sid = match sid {
+        None | Some("") => return Ok(vec![]),
+        Some(s) => s,
+    };
+    if sid.len() % 2 != 0 || sid.len() > 16 {
+        return Err(anyhow!("REALITY sid must be 0–8 hex bytes, got {:?}", sid));
+    }
+    (0..sid.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&sid[i..i + 2], 16).map_err(|e| anyhow!("sid hex: {}", e)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::net::Ipv4Addr;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
@@ -429,6 +486,11 @@ mod tests {
             port,
             username: Some(uuid.to_string()),
             password: None,
+            reality_public_key: None,
+            reality_short_id: None,
+            sni: None,
+            flow: None,
+            fingerprint: None,
         }
     }
 
@@ -442,6 +504,11 @@ mod tests {
             port,
             username: None,
             password: Some(password.to_string()),
+            reality_public_key: None,
+            reality_short_id: None,
+            sni: None,
+            flow: None,
+            fingerprint: None,
         }
     }
 
@@ -455,6 +522,11 @@ mod tests {
             port,
             username: Some(method.to_string()),
             password: Some(password.to_string()),
+            reality_public_key: None,
+            reality_short_id: None,
+            sni: None,
+            flow: None,
+            fingerprint: None,
         }
     }
 
@@ -659,5 +731,81 @@ mod tests {
 
         let result = ProxyConnector::connect(&profile, &target, 443).await;
         assert!(result.is_err());
+    }
+
+    /// Локальный тест против реальной подписки: читает `.local/local_subscription.txt`
+    /// (в .gitignore, не коммитится) и пытается измерить latency для первого
+    /// профиля. Если файла нет, тест молча пропускается. Запуск:
+    /// `cargo test --lib proxy::connector -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "требует локальный файл .local/local_subscription.txt с реальной подпиской"]
+    async fn test_connector_against_local_subscription() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.local/local_subscription.txt");
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => return,
+        };
+
+        for line in content.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let profile = match crate::config::parse_subscription_url(line) {
+                Ok(profile) => profile,
+                Err(e) => {
+                    println!("SKIP (parse error): {} -> {}", line, e);
+                    continue;
+                }
+            };
+
+            match ProxyConnector::measure_latency(&profile).await {
+                Ok(ping) => println!("OK   {} ({}:{}) -> {} ms", profile.name, profile.server, profile.port, ping),
+                Err(e) => println!("FAIL {} ({}:{}) -> {}", profile.name, profile.server, profile.port, e),
+            }
+        }
+    }
+
+    // ── REALITY parameter helpers ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_reality_pubkey_valid() {
+        // 32 zero bytes base64url-encoded (no padding)
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode([0u8; 32]);
+        let key = parse_reality_pubkey(&b64).unwrap();
+        assert_eq!(key, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_parse_reality_pubkey_wrong_length() {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode([0u8; 16]); // too short
+        assert!(parse_reality_pubkey(&b64).is_err());
+    }
+
+    #[test]
+    fn test_parse_reality_pubkey_invalid_b64() {
+        assert!(parse_reality_pubkey("not!!base64").is_err());
+    }
+
+    #[test]
+    fn test_parse_reality_short_id_empty() {
+        assert_eq!(parse_reality_short_id(None).unwrap(), Vec::<u8>::new());
+        assert_eq!(parse_reality_short_id(Some("")).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_parse_reality_short_id_valid() {
+        assert_eq!(parse_reality_short_id(Some("abcd")).unwrap(), vec![0xab, 0xcd]);
+        assert_eq!(parse_reality_short_id(Some("deadbeef01020304")).unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_parse_reality_short_id_too_long() {
+        assert!(parse_reality_short_id(Some("aabbccddeeff00112233")).is_err()); // 10 bytes
+    }
+
+    #[test]
+    fn test_parse_reality_short_id_odd_hex() {
+        assert!(parse_reality_short_id(Some("abc")).is_err()); // odd length
     }
 }

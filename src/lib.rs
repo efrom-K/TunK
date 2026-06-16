@@ -4,6 +4,7 @@
 pub mod config;
 pub mod commands;
 pub mod network {
+    pub mod dispatch;
     pub mod dns;
     pub mod route;
     pub mod tun;
@@ -12,7 +13,9 @@ pub mod network {
 pub mod proxy {
     pub mod connector;
     pub mod obfuscation;
+    pub mod reality;
     pub mod sniffer;
+    pub mod tls13;
 }
 
 pub mod utils;

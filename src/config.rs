@@ -13,6 +13,21 @@ pub struct ProxyProfile {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Публичный ключ REALITY (`pbk`, base64url X25519), если используется `security=reality`.
+    #[serde(default)]
+    pub reality_public_key: Option<String>,
+    /// Short ID REALITY (`sid`, hex), если используется `security=reality`.
+    #[serde(default)]
+    pub reality_short_id: Option<String>,
+    /// SNI камуфляжа для REALITY/TLS (`sni`).
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// Режим потока, например `xtls-rprx-vision` (`flow`).
+    #[serde(default)]
+    pub flow: Option<String>,
+    /// TLS fingerprint для имитации клиента (`fp`), например `firefox`.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +147,7 @@ fn parse_vless_url(original_url: &str, rest: &str) -> Result<ProxyProfile, Strin
 
     let (server, port) = split_host_port(host_port)?;
     let name = extract_fragment_name(rest, &server);
+    let params = parse_query_params(rest);
 
     Ok(ProxyProfile {
         id: Uuid::new_v4().to_string(),
@@ -142,6 +158,11 @@ fn parse_vless_url(original_url: &str, rest: &str) -> Result<ProxyProfile, Strin
         port,
         username: Some(uuid.to_string()),
         password: None,
+        reality_public_key: params.get("pbk").cloned(),
+        reality_short_id: params.get("sid").cloned(),
+        sni: params.get("sni").cloned(),
+        flow: params.get("flow").cloned(),
+        fingerprint: params.get("fp").cloned(),
     })
 }
 
@@ -169,6 +190,11 @@ fn parse_trojan_url(original_url: &str, rest: &str) -> Result<ProxyProfile, Stri
         port,
         username: None,
         password: Some(password.to_string()),
+        reality_public_key: None,
+        reality_short_id: None,
+        sni: None,
+        flow: None,
+        fingerprint: None,
     })
 }
 
@@ -197,6 +223,11 @@ fn parse_shadowsocks_url(original_url: &str, rest: &str) -> Result<ProxyProfile,
         port,
         username: Some(method.to_string()),
         password: Some(password.to_string()),
+        reality_public_key: None,
+        reality_short_id: None,
+        sni: None,
+        flow: None,
+        fingerprint: None,
     })
 }
 
@@ -204,6 +235,29 @@ fn parse_shadowsocks_url(original_url: &str, rest: &str) -> Result<ProxyProfile,
 fn strip_query_and_fragment(value: &str) -> &str {
     let without_fragment = value.split('#').next().unwrap_or(value);
     without_fragment.split('?').next().unwrap_or(without_fragment)
+}
+
+/// Разбирает query-строку (`?key=value&...`) на карту параметров с percent-декодированием значений.
+/// Fragment (`#...`) отрезается перед разбором.
+fn parse_query_params(value: &str) -> std::collections::HashMap<String, String> {
+    let without_fragment = value.split('#').next().unwrap_or(value);
+
+    let query = match without_fragment.find('?') {
+        Some(idx) => &without_fragment[idx + 1..],
+        None => return std::collections::HashMap::new(),
+    };
+
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let (key, val) = pair.split_once('=')?;
+            let decoded_value = percent_decode_str(val)
+                .decode_utf8()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| val.to_string());
+            Some((key.to_string(), decoded_value))
+        })
+        .collect()
 }
 
 /// Разбирает `host:port` на хост и порт.
@@ -290,6 +344,11 @@ mod tests {
             port: 443,
             username: Some("user".to_string()),
             password: None,
+            reality_public_key: None,
+            reality_short_id: None,
+            sni: None,
+            flow: None,
+            fingerprint: None,
         };
 
         let json = serde_json::to_string(&profile).unwrap();
@@ -309,6 +368,30 @@ mod tests {
         assert_eq!(profile.password, None);
         assert_eq!(profile.name, "My Server");
         assert_eq!(profile.url, url);
+        assert_eq!(profile.reality_public_key, None);
+        assert_eq!(profile.reality_short_id, None);
+        assert_eq!(profile.sni, None);
+        assert_eq!(profile.flow, None);
+        assert_eq!(profile.fingerprint, None);
+    }
+
+    #[test]
+    fn test_parse_vless_url_with_reality_params() {
+        let url = "vless://550e8400-e29b-41d4-a716-446655440000@example.com:443?security=reality&encryption=none&pbk=AbCdEf1234567890_-AbCdEf1234567890_-AbCdEf1234&fp=firefox&type=tcp&flow=xtls-rprx-vision&sni=storage.example.net&sid=ab12cd34#%F0%9F%87%BANode";
+
+        let profile = parse_subscription_url(url).unwrap();
+
+        assert!(matches!(profile.protocol, ProtocolType::Vless));
+        assert_eq!(profile.server, "example.com");
+        assert_eq!(profile.port, 443);
+        assert_eq!(
+            profile.reality_public_key.as_deref(),
+            Some("AbCdEf1234567890_-AbCdEf1234567890_-AbCdEf1234")
+        );
+        assert_eq!(profile.reality_short_id.as_deref(), Some("ab12cd34"));
+        assert_eq!(profile.sni.as_deref(), Some("storage.example.net"));
+        assert_eq!(profile.flow.as_deref(), Some("xtls-rprx-vision"));
+        assert_eq!(profile.fingerprint.as_deref(), Some("firefox"));
     }
 
     #[test]

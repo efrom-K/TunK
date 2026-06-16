@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 
 use crate::network::route::RouteManager;
+use crate::network::dispatch;
+use crate::state::AppState;
 
 /// Имя пула адаптеров Wintun, используемое этим приложением.
 const WINTUN_POOL: &str = "TunK";
@@ -115,42 +117,21 @@ impl WintunAdapter {
         RouteManager::delete_route(proxy_server, HOST_MASK)
     }
 
-    /// Асинхронный цикл чтения пакетов из Wintun. Каждый полученный пакет
-    /// учитывается в статистике скорости соединения.
-    pub async fn packet_loop(&self, state: Arc<Mutex<VpnState>>) -> Result<()> {
-        let session = {
-            let guard = self.session.lock().map_err(|e| anyhow!("Не удалось заблокировать сессию: {}", e))?;
-            guard
-                .as_ref()
-                .ok_or_else(|| anyhow!("Сессия Wintun не инициализирована"))?
-                .session
-                .clone()
-        };
+    /// Returns the active Wintun session, or an error if not yet activated.
+    pub fn get_session(&self) -> Result<Arc<wintun::Session>> {
+        let guard = self.session.lock().map_err(|e| anyhow!("{}", e))?;
+        guard
+            .as_ref()
+            .map(|ws| ws.session.clone())
+            .ok_or_else(|| anyhow!("Wintun session not active"))
+    }
 
-        while self.is_active.load(Ordering::SeqCst) {
-            let session_clone = session.clone();
-
-            // WintunReceivePacket блокирует поток, поэтому выполняем его в spawn_blocking
-            let received = tokio::task::spawn_blocking(move || session_clone.receive_blocking())
-                .await
-                .map_err(|e| anyhow!("Ошибка задачи чтения пакетов: {}", e))?;
-
-            match received {
-                Ok(packet) => {
-                    let len = packet.bytes().len() as u64;
-                    if let Ok(mut state_guard) = state.lock() {
-                        state_guard.speed_bps += len;
-                    }
-                    // Пакет освобождается автоматически при выходе из области видимости
-                }
-                Err(_) => {
-                    // Сессия завершена через shutdown()
-                    break;
-                }
-            }
-        }
-
-        Ok(())
+    /// Reads packets from the Wintun session and dispatches each TCP flow
+    /// destined for the FakeIP range to a proxy relay task.
+    /// Returns when `deactivate()` is called (which shuts down the session).
+    pub async fn packet_loop(&self, state: Arc<AppState>) -> Result<()> {
+        let session = self.get_session()?;
+        dispatch::run_dispatch(session, state).await
     }
 
     pub fn get_interface_name(&self) -> &str {
@@ -166,33 +147,6 @@ impl WintunAdapter {
     }
 }
 
-pub struct VpnState {
-    pub status: crate::VpnStatus,
-    pub speed_bps: u64,
-    pub current_profile: Option<String>,
-}
-
-impl VpnState {
-    pub fn new() -> Self {
-        Self {
-            status: crate::VpnStatus::Disconnected,
-            speed_bps: 0,
-            current_profile: None,
-        }
-    }
-
-    pub fn set_status(&mut self, status: crate::VpnStatus) {
-        self.status = status;
-    }
-
-    pub fn set_speed(&mut self, speed_bps: u64) {
-        self.speed_bps = speed_bps;
-    }
-
-    pub fn set_profile(&mut self, profile: String) {
-        self.current_profile = Some(profile);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -209,91 +163,55 @@ mod tests {
     #[test]
     fn test_get_adapter_index_before_activation() {
         let adapter = WintunAdapter::new("vpn-tun").unwrap();
-
-        // Без активации индекс адаптера недоступен
         assert!(adapter.get_adapter_index().is_err());
+    }
+
+    #[test]
+    fn test_get_session_before_activation() {
+        let adapter = WintunAdapter::new("vpn-tun").unwrap();
+        assert!(adapter.get_session().is_err());
     }
 
     #[tokio::test]
     async fn test_packet_loop_without_activation() {
-        let state = Arc::new(Mutex::new(VpnState::new()));
+        let state = Arc::new(AppState::new());
         let adapter = WintunAdapter::new("vpn-tun").unwrap();
-
-        // Без активной сессии packet_loop должен вернуть ошибку, а не паниковать
+        // Without an active session, packet_loop must return Err immediately.
         assert!(adapter.packet_loop(state).await.is_err());
     }
 
     #[test]
-    #[ignore = "требует установленный wintun.dll и права администратора"]
+    #[ignore = "requires wintun.dll and administrator privileges"]
     fn test_wintun_activation() {
         let adapter = WintunAdapter::new("vpn-tun").unwrap();
-
         adapter.activate().unwrap();
         assert!(adapter.is_active());
-
         adapter.deactivate().unwrap();
         assert!(!adapter.is_active());
     }
 
     #[tokio::test]
-    #[ignore = "требует установленный wintun.dll и права администратора"]
-    async fn test_packet_loop_simulation() {
-        let state = Arc::new(Mutex::new(VpnState::new()));
+    #[ignore = "requires wintun.dll and administrator privileges"]
+    async fn test_packet_loop_runs_until_deactivate() {
+        let state = Arc::new(AppState::new());
         let adapter = WintunAdapter::new("vpn-tun").unwrap();
-
         adapter.activate().unwrap();
-
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), adapter.packet_loop(state.clone()))
-            .await
-            .ok();
-
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            adapter.packet_loop(state),
+        )
+        .await
+        .ok();
         assert!(adapter.is_active());
     }
 
     #[test]
-    #[ignore = "требует установленный wintun.dll и права администратора"]
+    #[ignore = "requires wintun.dll and administrator privileges"]
     fn test_configure_routing() {
         let adapter = WintunAdapter::new("vpn-tun").unwrap();
         adapter.activate().unwrap();
-
         let proxy_server = Ipv4Addr::new(1, 2, 3, 4);
         adapter.configure_routing(proxy_server).unwrap();
         adapter.restore_routing(proxy_server).unwrap();
-    }
-
-    #[test]
-    fn test_vpn_state_creation() {
-        let state = VpnState::new();
-        assert_eq!(state.status, crate::VpnStatus::Disconnected);
-        assert_eq!(state.speed_bps, 0);
-        assert!(state.current_profile.is_none());
-    }
-
-    #[test]
-    fn test_vpn_state_status_update() {
-        let mut state = VpnState::new();
-
-        state.set_status(crate::VpnStatus::Connecting);
-        assert_eq!(state.status, crate::VpnStatus::Connecting);
-
-        state.set_status(crate::VpnStatus::Connected);
-        assert_eq!(state.status, crate::VpnStatus::Connected);
-    }
-
-    #[test]
-    fn test_vpn_state_speed_update() {
-        let mut state = VpnState::new();
-        state.set_speed(1024 * 1024); // 1 Mbps
-
-        assert_eq!(state.speed_bps, 1024 * 1024);
-    }
-
-    #[test]
-    fn test_vpn_state_profile_update() {
-        let mut state = VpnState::new();
-
-        state.set_profile("vless://user@server.com".to_string());
-
-        assert_eq!(state.current_profile, Some("vless://user@server.com".to_string()));
     }
 }
