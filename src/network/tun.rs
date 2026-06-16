@@ -21,6 +21,13 @@ const TUNNEL_METRIC: u32 = 1;
 /// Метрика маршрута-исключения для прокси-сервера (через реальный шлюз).
 const EXCLUSION_METRIC: u32 = 1;
 
+/// IP-адрес, назначаемый на Wintun-интерфейс — шлюз FakeIP-подсети `198.18.0.0/16`.
+/// Без этого адреса ОС не знает, как маршрутизировать пакеты к TUN-адаптеру.
+const TUN_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+
+/// Маска подсети FakeIP-пула (`/16`).
+const TUN_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 0, 0);
+
 /// Активная сессия Wintun: адаптер должен жить не меньше, чем связанная с ним сессия.
 struct WintunSession {
     adapter: Arc<wintun::Adapter>,
@@ -70,6 +77,11 @@ impl WintunAdapter {
             session: Arc::new(session),
         });
 
+        // Assign the static IP address to the TUN interface.  Without this the OS has no
+        // subnet route pointing at the adapter and cannot deliver packets to it.
+        RouteManager::set_interface_address(&self.interface_name, TUN_ADDRESS, TUN_NETMASK)
+            .map_err(|e| anyhow!("Не удалось назначить IP {} на {}: {}", TUN_ADDRESS, self.interface_name, e))?;
+
         self.is_active.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -81,6 +93,9 @@ impl WintunAdapter {
         if let Some(wintun_session) = guard.take() {
             wintun_session.session.shutdown();
         }
+
+        // Best-effort: remove the static IP so the dormant interface has no stale address.
+        let _ = RouteManager::clear_interface_address(&self.interface_name);
 
         self.is_active.store(false, Ordering::SeqCst);
         Ok(())
@@ -151,6 +166,16 @@ impl WintunAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tun_address_constants() {
+        assert_eq!(TUN_ADDRESS, Ipv4Addr::new(198, 18, 0, 1));
+        assert_eq!(TUN_NETMASK, Ipv4Addr::new(255, 255, 0, 0));
+        // Verify the address is within the FakeIP pool (198.18.0.0/16).
+        let octets = TUN_ADDRESS.octets();
+        assert_eq!(octets[0], 198);
+        assert_eq!(octets[1], 18);
+    }
 
     #[test]
     fn test_wintun_adapter_creation() {

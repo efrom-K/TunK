@@ -89,6 +89,32 @@ fn netsh_set_metric_args(interface_index: u32, metric: u32) -> Vec<String> {
     ]
 }
 
+/// Аргументы для `netsh interface ip set address <name> static <ip> <mask>`
+fn netsh_set_address_args(interface_name: &str, address: Ipv4Addr, mask: Ipv4Addr) -> Vec<String> {
+    vec![
+        "interface".to_string(),
+        "ip".to_string(),
+        "set".to_string(),
+        "address".to_string(),
+        interface_name.to_string(),
+        "static".to_string(),
+        address.to_string(),
+        mask.to_string(),
+    ]
+}
+
+/// Аргументы для `netsh interface ip set address <name> dhcp`
+fn netsh_clear_address_args(interface_name: &str) -> Vec<String> {
+    vec![
+        "interface".to_string(),
+        "ip".to_string(),
+        "set".to_string(),
+        "address".to_string(),
+        interface_name.to_string(),
+        "dhcp".to_string(),
+    ]
+}
+
 /// Управление таблицей маршрутизации Windows через `route` и `netsh`.
 pub struct RouteManager;
 
@@ -122,6 +148,36 @@ impl RouteManager {
             Ok(())
         } else {
             Err(anyhow!("netsh завершился с кодом ошибки: {:?}", status.code()))
+        }
+    }
+
+    /// Назначает статический IP-адрес и маску на сетевой интерфейс по имени.
+    /// Используется для назначения адреса `198.18.0.1/16` на Wintun-адаптер после его создания.
+    pub fn set_interface_address(interface_name: &str, address: Ipv4Addr, mask: Ipv4Addr) -> Result<()> {
+        let status = Command::new("netsh")
+            .args(netsh_set_address_args(interface_name, address, mask))
+            .status()
+            .context("Не удалось выполнить netsh interface ip set address")?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("netsh set address завершился с кодом ошибки: {:?}", status.code()))
+        }
+    }
+
+    /// Снимает статический IP-адрес с интерфейса (переводит в DHCP).
+    /// Вызывается при деактивации адаптера, чтобы не оставлять IP на нерабочем интерфейсе.
+    pub fn clear_interface_address(interface_name: &str) -> Result<()> {
+        let status = Command::new("netsh")
+            .args(netsh_clear_address_args(interface_name))
+            .status()
+            .context("Не удалось выполнить netsh interface ip set address dhcp")?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("netsh clear address завершился с кодом ошибки: {:?}", status.code()))
         }
     }
 
@@ -254,6 +310,24 @@ Network Destination        Netmask          Gateway       Interface  Metric
         let args = netsh_set_metric_args(15, 1);
 
         assert_eq!(args, vec!["interface", "ipv4", "set", "interface", "15", "metric=1"]);
+    }
+
+    #[test]
+    fn test_netsh_set_address_args() {
+        let args = netsh_set_address_args("vpn-tun", Ipv4Addr::new(198, 18, 0, 1), Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(
+            args,
+            vec!["interface", "ip", "set", "address", "vpn-tun", "static", "198.18.0.1", "255.255.0.0"]
+        );
+    }
+
+    #[test]
+    fn test_netsh_clear_address_args() {
+        let args = netsh_clear_address_args("vpn-tun");
+        assert_eq!(
+            args,
+            vec!["interface", "ip", "set", "address", "vpn-tun", "dhcp"]
+        );
     }
 
     #[test]
