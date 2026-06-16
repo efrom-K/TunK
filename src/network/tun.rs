@@ -114,12 +114,12 @@ impl WintunAdapter {
             .map_err(|e| anyhow!("Не удалось получить индекс адаптера: {}", e))
     }
 
-    /// Настраивает таблицу маршрутизации Windows:
-    /// 1. Добавляет /32 маршрут-исключение для прокси-сервера через реальный шлюз
-    ///    (чтобы сам трафик до прокси не ушёл в туннель и не образовал петлю).
-    /// 2. Устанавливает метрику Wintun-интерфейса в 1 (наивысший приоритет).
-    /// 3. Добавляет split-default (0.0.0.0/1 + 128.0.0.0/1 через TUN_ADDRESS),
-    ///    которые гарантированно перебивают реальный 0.0.0.0/0 по longest-prefix match.
+    /// Настраивает таблицу маршрутизации и DNS для работы VPN:
+    /// 1. /32 маршрут-исключение для прокси через реальный шлюз (против петли).
+    /// 2. Метрика TUN-интерфейса = 1 (наивысший приоритет).
+    /// 3. Split-default 0.0.0.0/1 + 128.0.0.0/1 через TUN — перебивает /0 по LPM.
+    /// 4. DNS 127.0.0.1 на TUN-интерфейс — Windows DNS Client выбирает его первым.
+    /// 5. Сброс DNS-кэша (best-effort).
     pub fn configure_routing(&self, proxy_server: Ipv4Addr) -> Result<()> {
         let interface_index = self.get_adapter_index()?;
         let gateway = RouteManager::get_default_gateway()?;
@@ -127,20 +127,34 @@ impl WintunAdapter {
         RouteManager::add_route(proxy_server, HOST_MASK, gateway, EXCLUSION_METRIC)?;
         RouteManager::set_interface_metric(interface_index, TUNNEL_METRIC)?;
         RouteManager::add_split_default_route(TUN_ADDRESS, TUNNEL_METRIC)?;
+        RouteManager::set_interface_dns(&self.interface_name, Ipv4Addr::new(127, 0, 0, 1))?;
+        // Best-effort: a stale cache is not fatal — new queries will reach our proxy anyway.
+        let _ = RouteManager::flush_dns_cache();
 
         Ok(())
     }
 
-    /// Откатывает изменения маршрутизации, сделанные в [`configure_routing`]:
-    /// удаляет /32 маршрут-исключение прокси и оба split-default маршрута.
-    /// Оба удаления выполняются всегда, ошибки объединяются.
+    /// Откатывает все изменения, сделанные в [`configure_routing`]:
+    /// удаляет /32 исключение прокси, split-default маршруты, DNS с TUN-интерфейса.
+    /// Все шаги выполняются всегда, ошибки объединяются в одну.
     pub fn restore_routing(&self, proxy_server: Ipv4Addr) -> Result<()> {
-        let e1 = RouteManager::delete_route(proxy_server, HOST_MASK).err();
-        let e2 = RouteManager::delete_split_default_route().err();
-        match (e1, e2) {
-            (None, None) => Ok(()),
-            (Some(e), None) | (None, Some(e)) => Err(e),
-            (Some(e1), Some(e2)) => Err(anyhow!("{}; {}", e1, e2)),
+        let errs: Vec<String> = [
+            RouteManager::delete_route(proxy_server, HOST_MASK).err(),
+            RouteManager::delete_split_default_route().err(),
+            RouteManager::clear_interface_dns(&self.interface_name).err(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|e| e.to_string())
+        .collect();
+
+        // Best-effort flush regardless of errors above.
+        let _ = RouteManager::flush_dns_cache();
+
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("{}", errs.join("; ")))
         }
     }
 

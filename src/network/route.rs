@@ -115,6 +115,31 @@ fn netsh_clear_address_args(interface_name: &str) -> Vec<String> {
     ]
 }
 
+/// Аргументы для `netsh interface ip set dns <name> static <ip>`
+fn netsh_set_dns_args(interface_name: &str, dns_ip: Ipv4Addr) -> Vec<String> {
+    vec![
+        "interface".to_string(),
+        "ip".to_string(),
+        "set".to_string(),
+        "dns".to_string(),
+        interface_name.to_string(),
+        "static".to_string(),
+        dns_ip.to_string(),
+    ]
+}
+
+/// Аргументы для `netsh interface ip set dns <name> dhcp` (сброс DNS)
+fn netsh_clear_dns_args(interface_name: &str) -> Vec<String> {
+    vec![
+        "interface".to_string(),
+        "ip".to_string(),
+        "set".to_string(),
+        "dns".to_string(),
+        interface_name.to_string(),
+        "dhcp".to_string(),
+    ]
+}
+
 /// Управление таблицей маршрутизации Windows через `route` и `netsh`.
 pub struct RouteManager;
 
@@ -233,6 +258,52 @@ impl RouteManager {
             (None, None) => Ok(()),
             (Some(e), None) | (None, Some(e)) => Err(e),
             (Some(e1), Some(e2)) => Err(anyhow!("{}; {}", e1, e2)),
+        }
+    }
+
+    /// Назначает статический DNS-сервер на сетевой интерфейс по имени.
+    /// Устанавливается на TUN-интерфейс (метрика 1), и Windows DNS Client
+    /// выбирает его первым среди всех интерфейсов — без изменения реального адаптера.
+    pub fn set_interface_dns(interface_name: &str, dns_ip: Ipv4Addr) -> Result<()> {
+        let status = Command::new("netsh")
+            .args(netsh_set_dns_args(interface_name, dns_ip))
+            .status()
+            .context("Не удалось выполнить netsh interface ip set dns")?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("netsh set dns завершился с кодом ошибки: {:?}", status.code()))
+        }
+    }
+
+    /// Сбрасывает статический DNS с интерфейса (переводит в DHCP).
+    /// Вызывается при отключении VPN для отмены перенаправления запросов.
+    pub fn clear_interface_dns(interface_name: &str) -> Result<()> {
+        let status = Command::new("netsh")
+            .args(netsh_clear_dns_args(interface_name))
+            .status()
+            .context("Не удалось выполнить netsh interface ip set dns dhcp")?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("netsh clear dns завершился с кодом ошибки: {:?}", status.code()))
+        }
+    }
+
+    /// Сбрасывает кэш Windows DNS Client (`ipconfig /flushdns`).
+    /// Вызывается после изменения DNS-сервера, чтобы стейл-записи не мешали.
+    pub fn flush_dns_cache() -> Result<()> {
+        let status = Command::new("ipconfig")
+            .arg("/flushdns")
+            .status()
+            .context("Не удалось выполнить ipconfig /flushdns")?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("ipconfig /flushdns завершился с кодом ошибки: {:?}", status.code()))
         }
     }
 }
@@ -354,6 +425,24 @@ Network Destination        Netmask          Gateway       Interface  Metric
         assert_eq!(
             args,
             vec!["interface", "ip", "set", "address", "vpn-tun", "dhcp"]
+        );
+    }
+
+    #[test]
+    fn test_netsh_set_dns_args() {
+        let args = netsh_set_dns_args("vpn-tun", Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(
+            args,
+            vec!["interface", "ip", "set", "dns", "vpn-tun", "static", "127.0.0.1"]
+        );
+    }
+
+    #[test]
+    fn test_netsh_clear_dns_args() {
+        let args = netsh_clear_dns_args("vpn-tun");
+        assert_eq!(
+            args,
+            vec!["interface", "ip", "set", "dns", "vpn-tun", "dhcp"]
         );
     }
 
