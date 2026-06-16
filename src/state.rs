@@ -1,6 +1,8 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
+use tokio::task::AbortHandle;
 use chrono;
 
 use crate::config::ProxyProfile;
@@ -83,6 +85,10 @@ pub struct AppState {
     pub profile_id: RwLock<Option<String>>,
     pub profiles: RwLock<Vec<ProxyProfile>>,
     pub tunnel: Mutex<Option<WintunAdapter>>,
+    /// Handles for the DNS proxy and dispatch loop tasks; aborted on disconnect.
+    pub task_handles: Mutex<Vec<AbortHandle>>,
+    /// IP address of the active proxy server, stored for routing teardown.
+    pub proxy_ip: Mutex<Option<Ipv4Addr>>,
 }
 
 impl Default for AppState {
@@ -97,6 +103,8 @@ impl Default for AppState {
             profile_id: RwLock::new(None),
             profiles: RwLock::new(Vec::new()),
             tunnel: Mutex::new(None),
+            task_handles: Mutex::new(Vec::new()),
+            proxy_ip: Mutex::new(None),
         }
     }
 }
@@ -264,6 +272,34 @@ impl AppState {
     pub fn get_logs(&self) -> Result<Vec<LogEntry>, String> {
         let logs = self.logs.lock().map_err(|e| e.to_string())?;
         Ok(logs.clone())
+    }
+
+    /// Registers an abort handle for a background task (DNS proxy or dispatch loop).
+    pub fn register_task_handle(&self, handle: AbortHandle) {
+        if let Ok(mut guards) = self.task_handles.lock() {
+            guards.push(handle);
+        }
+    }
+
+    /// Aborts all registered background tasks and clears the handle list.
+    pub fn abort_background_tasks(&self) {
+        if let Ok(mut handles) = self.task_handles.lock() {
+            for h in handles.drain(..) {
+                h.abort();
+            }
+        }
+    }
+
+    /// Stores the proxy server IP used during this connection (for routing teardown).
+    pub fn set_proxy_ip(&self, ip: Option<Ipv4Addr>) {
+        if let Ok(mut guard) = self.proxy_ip.lock() {
+            *guard = ip;
+        }
+    }
+
+    /// Returns the stored proxy server IP, or None if not connected.
+    pub fn get_proxy_ip(&self) -> Option<Ipv4Addr> {
+        self.proxy_ip.lock().ok().and_then(|g| *g)
     }
 }
 

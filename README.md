@@ -29,7 +29,7 @@ A lightweight VPN client for Windows 11 built on **Tauri v2** (Rust backend + Va
 | **Subscription Parsing** | ✅ Done | `vless://`, `ss://`, `trojan://` URL parsing; REALITY `pbk`/`sid`/`sni`/`fp` query params decoded. |
 | **Tauri Commands & UI** | ✅ Done | `toggle_vpn`, `add_subscription`, `get_vpn_status`, `get_speed_bps`, `set_profile`, `get_profiles`, `get_logs`, `test_profile_connection` wired to the React frontend. |
 | **Obfuscation Module** | ⚠️ Partial | `proxy/obfuscation.rs` is length-prefix framing only (unit-test scaffolding); real crypto lives in `proxy/connector.rs`. |
-| **toggle_vpn wiring** | ⬜ TODO | `toggle_vpn` needs to start the DNS listener + dispatch loop + configure routing and store `JoinHandle`s for shutdown (Stage 4). |
+| **toggle_vpn wiring** | ✅ Done | `toggle_vpn` activates Wintun, resolves the proxy IP, configures routing, spawns the DNS proxy and dispatch loop as `AbortHandle`-tracked tasks; on disconnect aborts tasks, restores routing, and clears FakeIP cache. |
 | **System Tray** | ⬜ TODO | Hide window on close, tray menu with Connect/Disconnect/Expand/Exit (Stage 5). |
 
 ---
@@ -128,11 +128,29 @@ cargo test -- --ignored --nocapture
 cargo test --lib proxy::connector -- --ignored --nocapture
 ```
 
-Current test count: **160 tests**, 0 failures, 7 ignored (wintun/admin/network).
+Current test count: **162 tests**, 0 failures, 7 ignored (wintun/admin/network).
 
 ---
 
 ## Changelog
+
+### v0.4.0 — Full connect/disconnect lifecycle (toggle_vpn wiring)
+
+**`commands.rs`** (updated):
+- `toggle_vpn_impl` is now `async fn` and accepts `Arc<AppState>`.
+- All Tauri command signatures changed from `State<'_, AppState>` to `State<'_, Arc<AppState>>` so the Arc can be cloned into spawned tasks.
+- **On connect**: activates Wintun adapter → extracts `Arc<Session>` → resolves proxy server hostname to IPv4 via `resolve_host_ipv4` (direct parse, then `tokio::net::lookup_host`) → calls `configure_routing` → stores adapter in `state.tunnel` → spawns `DnsProxy::run` and `dispatch::run_dispatch` as Tokio tasks → stores their `AbortHandle`s in `state.task_handles`.
+- **On disconnect**: calls `state.abort_background_tasks()` to cancel DNS + dispatch tasks → calls `adapter.restore_routing` to remove the proxy-exclusion route → calls `adapter.deactivate()` → clears FakeIP cache → resets `proxy_ip`.
+- 2 new tests: `test_resolve_host_ipv4_direct`, `test_resolve_host_ipv4_ipv6_address_is_skipped`.
+
+**`state.rs`** (updated):
+- New fields: `task_handles: Mutex<Vec<AbortHandle>>`, `proxy_ip: Mutex<Option<Ipv4Addr>>`.
+- New methods: `register_task_handle`, `abort_background_tasks`, `set_proxy_ip`, `get_proxy_ip`.
+
+**`lib.rs`** (updated):
+- Managed type changed from `AppState` to `Arc<AppState>`: `.manage(Arc::new(AppState::new()))`.
+
+---
 
 ### v0.3.0 — Packet dispatch loop + REALITY TLS 1.3
 

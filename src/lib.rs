@@ -36,7 +36,7 @@ use commands::{
 /// а `main.rs` остаётся тонкой оберткой.
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(std::sync::Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             toggle_vpn,
             add_subscription,
